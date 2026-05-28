@@ -12,7 +12,7 @@ using WebAPI.Adapters;
 
 namespace WebAPI.Controls
 {
-    public partial class ChannelPanel : UserControl
+    public partial class ChannelPanel : System.Windows.Controls.UserControl
     {
         private readonly ChannelConfig _config;
         private ChannelHttpServer? _httpServer;
@@ -90,7 +90,7 @@ namespace WebAPI.Controls
                 await InitializeWebView2Async();
 
                 PanelStatus.Text = "✅ 正在运行 (V2)";
-                PanelStatus.Foreground = (Brush)Application.Current.FindResource("AccentGreen");
+                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
                 _isRunning = true;
 
                 Log("初始化完成（流式响应已启用）", LogLevel.Info);
@@ -100,7 +100,7 @@ namespace WebAPI.Controls
                 Log($"初始化失败: {ex.Message}", LogLevel.Error);
                 _isRunning = true;
                 PanelStatus.Text = "⚠️ 服务已启动";
-                PanelStatus.Foreground = (Brush)Application.Current.FindResource("AccentGreen");
+                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
                 Log("服务已启动，可正常使用", LogLevel.Info);
             }
         }
@@ -120,6 +120,8 @@ namespace WebAPI.Controls
         {
             if (_adapter == null) return;
 
+            ShowLoadingSpinner();
+
             Directory.CreateDirectory(_adapter.UserDataFolder);
 
             try
@@ -135,13 +137,20 @@ namespace WebAPI.Controls
                 Log($"正在导航到 {_adapter.TargetUrl}...", LogLevel.Info);
                 WebView.Source = new Uri(_adapter.TargetUrl);
                 WebView.Visibility = Visibility.Visible;
-                PlaceholderText.Visibility = Visibility.Collapsed;
+                HideLoadingSpinner();
             }
             catch (WebView2RuntimeNotFoundException)
             {
+                HideLoadingSpinner();
                 Log("WebView2 Runtime 未安装", LogLevel.Error);
                 PlaceholderText.Text = "❌ WebView2 Runtime 未安装\n\n请访问以下链接下载安装：\nhttps://developer.microsoft.com/en-us/microsoft-edge/webview2/";
                 throw;
+            }
+            catch (Exception ex)
+            {
+                HideLoadingSpinner();
+                Log($"WebView2 初始化失败: {ex.Message}", LogLevel.Error);
+                PlaceholderText.Text = $"❌ 初始化失败: {ex.Message}";
             }
         }
 
@@ -646,6 +655,11 @@ namespace WebAPI.Controls
             await SendFromInputBoxAsync();
         }
 
+        public async Task TriggerSendAsync()
+        {
+            await SendFromInputBoxAsync();
+        }
+
         private void InputBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == System.Windows.Input.Key.Enter && !System.Windows.Input.Keyboard.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Shift))
@@ -682,6 +696,16 @@ namespace WebAPI.Controls
 
         private async void BtnRestartBrowser_Click(object sender, RoutedEventArgs e)
         {
+            await RestartBrowserAsync();
+        }
+
+        public async Task TriggerRestartBrowserAsync()
+        {
+            await RestartBrowserAsync();
+        }
+
+        private async Task RestartBrowserAsync()
+        {
             Log("重启浏览器内核...", LogLevel.Info);
 
             try
@@ -691,8 +715,7 @@ namespace WebAPI.Controls
                     WebView.CoreWebView2.Stop();
                 }
 
-                WebView.Visibility = Visibility.Collapsed;
-                PlaceholderText.Visibility = Visibility.Visible;
+                ShowLoadingSpinner();
                 PlaceholderText.Text = "正在重新初始化...";
 
                 await InitializeWebView2Async();
@@ -700,6 +723,7 @@ namespace WebAPI.Controls
             }
             catch (Exception ex)
             {
+                HideLoadingSpinner();
                 Log($"重启失败: {ex.Message}", LogLevel.Error);
             }
         }
@@ -708,30 +732,56 @@ namespace WebAPI.Controls
         {
             if (_isRunning)
             {
-                // 停止：关闭 HTTP 服务 + 隐藏 WebView2
-                _httpServer?.Stop();
-                HideWebView();
-                _isRunning = false;
-
-                BtnStopService.Content = "▶ 启动 HTTP 服务";
-                BtnStopService.Background = (Brush)Application.Current.FindResource("AccentGreen");
-                PanelStatus.Text = "⏹ 已停止";
-                PanelStatus.Foreground = (Brush)Application.Current.FindResource("TextSecondary");
-                Log("渠道已停止（HTTP 服务 + WebView2）", LogLevel.Warn);
+                StopChannel();
             }
             else
             {
-                // 启动：重新初始化 WebView2 + 启动 HTTP 服务
-                ShowWebView();
+                // 启动：重新初始化 HTTP 服务 + WebView2
+                _isInitialized = false;
                 _ = InitializeAsync();
                 _isRunning = true;
 
                 BtnStopService.Content = "⏹ 停止 HTTP 服务";
-                BtnStopService.Background = (Brush)Application.Current.FindResource("AccentRed");
+                BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentRed");
                 PanelStatus.Text = "✅ 正在运行 (V2)";
-                PanelStatus.Foreground = (Brush)Application.Current.FindResource("AccentGreen");
+                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
                 Log("渠道已启动", LogLevel.Info);
             }
+        }
+
+        public void StopChannel()
+        {
+            // 关闭 HTTP 服务 + 清理 WebView2
+            _httpServer?.Stop();
+
+            try
+            {
+                _requestCts?.Cancel();
+                _streamSignal?.Dispose();
+
+                if (WebView.CoreWebView2 != null)
+                {
+                    WebView.CoreWebView2.WebMessageReceived -= CoreWebView2_WebMessageReceived;
+                    WebView.CoreWebView2.NavigationCompleted -= WebView_NavigationCompleted;
+                    WebView.CoreWebView2.Stop();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"清理 WebView2 出错: {ex.Message}", LogLevel.Warn);
+            }
+
+            WebView.Visibility = Visibility.Collapsed;
+            PlaceholderText.Visibility = Visibility.Visible;
+            PlaceholderText.Text = "WebView2 已停止，点击「启动 HTTP 服务」重新加载";
+
+            _isRunning = false;
+
+            BtnStopService.Content = "▶ 启动 HTTP 服务";
+            BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
+            PanelStatus.Text = "⏹ 已停止";
+            PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("TextSecondary");
+            Log("渠道已停止（HTTP 服务 + WebView2）", LogLevel.Warn);
         }
 
         private void HideWebView()
@@ -741,9 +791,9 @@ namespace WebAPI.Controls
                 if (WebView.CoreWebView2 != null)
                 {
                     WebView.Visibility = Visibility.Collapsed;
-                    PlaceholderText.Visibility = Visibility.Visible;
-                    PlaceholderText.Text = "WebView2 已停止，点击「启动 HTTP 服务」重新加载";
                 }
+                ShowLoadingSpinner();
+                PlaceholderText.Text = "WebView2 已停止，点击「启动 HTTP 服务」重新加载";
                 Log("WebView2 已隐藏", LogLevel.Debug);
             }
             catch (Exception ex)
@@ -752,25 +802,36 @@ namespace WebAPI.Controls
             }
         }
 
-        private async void ShowWebView()
+        private void ShowWebView()
         {
             try
             {
-                PlaceholderText.Visibility = Visibility.Collapsed;
+                ShowLoadingSpinner();
                 WebView.Visibility = Visibility.Visible;
                 Log("WebView2 已显示，开始初始化...", LogLevel.Debug);
             }
             catch (Exception ex)
             {
+                HideLoadingSpinner();
                 Log($"显示 WebView2 失败: {ex.Message}", LogLevel.Warn);
             }
+        }
+
+        private void ShowLoadingSpinner()
+        {
+            LoadingPlaceholder.Visibility = Visibility.Visible;
+        }
+
+        private void HideLoadingSpinner()
+        {
+            LoadingPlaceholder.Visibility = Visibility.Collapsed;
         }
 
         private void CopyToClipboard(string text)
         {
             try
             {
-                Clipboard.SetText(text);
+                System.Windows.Clipboard.SetText(text);
                 Log($"已复制: {text}", LogLevel.Debug);
             }
             catch (Exception ex)

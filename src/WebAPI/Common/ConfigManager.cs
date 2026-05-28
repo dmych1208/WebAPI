@@ -9,6 +9,69 @@ namespace WebAPI.Common
         private static readonly string ConfigPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "config", "settings.json");
 
+        private static FileSystemWatcher? _watcher;
+        private static bool _watcherInitialized = false;
+        private static readonly object _watcherLock = new object();
+
+        public static event Action<List<ChannelConfig>>? ConfigReloaded;
+
+        public static void StartWatching()
+        {
+            lock (_watcherLock)
+            {
+                if (_watcherInitialized)
+                    return;
+
+                _watcherInitialized = true;
+
+                string configDir = Path.GetDirectoryName(ConfigPath);
+                if (string.IsNullOrEmpty(configDir) || !Directory.Exists(configDir))
+                    return;
+
+                try
+                {
+                    _watcher = new FileSystemWatcher(configDir, "settings.json")
+                    {
+                        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+                        EnableRaisingEvents = true
+                    };
+
+                    _watcher.Changed += OnConfigChanged;
+                    _watcher.Created += OnConfigChanged;
+
+                    LogManager.Write($"已启动配置文件监控: {ConfigPath}", LogLevel.Debug);
+                }
+                catch (Exception ex)
+                {
+                    LogManager.Write($"启动配置文件监控失败: {ex.Message}", LogLevel.Warn);
+                }
+            }
+        }
+
+        private static void OnConfigChanged(object sender, FileSystemEventArgs e)
+        {
+            try
+            {
+                Thread.Sleep(200);
+
+                LogManager.Write("检测到配置文件变更，正在重新加载...", LogLevel.Info);
+
+                var channels = LoadChannels();
+                if (channels.Count == 0)
+                {
+                    LogManager.Write("配置文件变更但内容为空，使用默认配置", LogLevel.Warn);
+                    channels = GetDefaultChannels();
+                }
+
+                ConfigReloaded?.Invoke(channels);
+                LogManager.Write($"配置已重新加载，共 {channels.Count} 个渠道", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                LogManager.Write($"重新加载配置失败: {ex.Message}", LogLevel.Error);
+            }
+        }
+
         public static List<ChannelConfig> LoadChannels()
         {
             var paths = new[]

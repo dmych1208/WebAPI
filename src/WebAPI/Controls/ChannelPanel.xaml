@@ -22,12 +22,22 @@
                 <Grid>
                     <wv2:WebView2 x:Name="WebView" Visibility="Collapsed"/>
                     <!-- 占位提示 -->
-                    <TextBlock x:Name="PlaceholderText" 
-                               Text="正在初始化浏览器..." 
+                    <StackPanel x:Name="LoadingPlaceholder"
                                HorizontalAlignment="Center" 
-                               VerticalAlignment="Center"
-                               Foreground="{StaticResource TextSecondary}"
-                               FontSize="14"/>
+                               VerticalAlignment="Center">
+                        <ProgressBar x:Name="LoadingSpinner"
+                                     Width="200" Height="4"
+                                     IsIndeterminate="True"
+                                     Background="Transparent"
+                                     Foreground="{StaticResource AccentBlue}"
+                                     BorderBrush="{StaticResource BorderGray}"
+                                     Margin="0,0,0,12"/>
+                        <TextBlock x:Name="PlaceholderText" 
+                                   Text="正在初始化浏览器..." 
+                                   HorizontalAlignment="Center" 
+                                   Foreground="{StaticResource TextSecondary}"
+                                   FontSize="14"/>
+                    </StackPanel>
                 </Grid>
             </Border>
 
