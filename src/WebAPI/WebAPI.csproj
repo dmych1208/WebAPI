@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>WebAPI</AssemblyName>
+    <RootNamespace>WebAPI</RootNamespace>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>logo.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2849.39" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="logo.ico" />
+    <None Include="logo.png" Condition="Exists('logo.png')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- IconInjector 是独立工具，排除以避免与 WPF App 的 Main 冲突 -->
+  <ItemGroup>
+    <Compile Remove="IconInjector.cs" />
+  </ItemGroup>
+
+</Project>
