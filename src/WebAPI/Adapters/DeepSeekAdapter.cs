@@ -470,6 +470,14 @@ namespace WebAPI.Adapters
             {
                 var data = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(dataJson);
 
+                // 检查是否是结束信号
+                if (data.TryGetProperty("finish_reason", out var frProp))
+                {
+                    string? fr = frProp.ValueKind == System.Text.Json.JsonValueKind.String ? frProp.GetString() : null;
+                    if (fr == "stop" || fr == "length" || fr == "content_filter")
+                        return null; // 返回 null 表示这是结束信号，由调用方处理
+                }
+
                 if (data.TryGetProperty("p", out var pProp) && data.TryGetProperty("v", out var vProp))
                 {
                     string p = pProp.GetString() ?? "";
@@ -509,16 +517,37 @@ namespace WebAPI.Adapters
                         return null;
                 }
 
+                // 标准 OpenAI 格式: choices[0].delta.content
                 if (data.TryGetProperty("choices", out var choicesProp) && choicesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
                 {
                     var firstChoice = choicesProp.EnumerateArray().FirstOrDefault();
-                    if (firstChoice.TryGetProperty("delta", out var deltaProp))
+                    if (firstChoice.ValueKind != System.Text.Json.JsonValueKind.Undefined)
                     {
-                        if (deltaProp.TryGetProperty("content", out var dcProp))
-                            return dcProp.GetString();
-                        if (deltaProp.TryGetProperty("reasoning_content", out var rcProp))
-                            return rcProp.GetString();
+                        if (firstChoice.TryGetProperty("delta", out var deltaProp))
+                        {
+                            if (deltaProp.TryGetProperty("content", out var dcProp))
+                                return dcProp.GetString();
+                            if (deltaProp.TryGetProperty("reasoning_content", out var rcProp))
+                                return rcProp.GetString();
+                        }
+                        if (firstChoice.TryGetProperty("message", out var msgProp))
+                        {
+                            if (msgProp.TryGetProperty("content", out var mcProp))
+                                return mcProp.GetString();
+                        }
                     }
+                }
+
+                // 直接 content 字段
+                if (data.TryGetProperty("content", out var directContent))
+                {
+                    return directContent.GetString();
+                }
+
+                // 直接 text 字段
+                if (data.TryGetProperty("text", out var directText))
+                {
+                    return directText.GetString();
                 }
 
                 var fragments = data.TryGetProperty("v", out var vFrag) && vFrag.ValueKind == System.Text.Json.JsonValueKind.Object

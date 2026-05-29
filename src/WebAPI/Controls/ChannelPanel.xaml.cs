@@ -547,6 +547,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
 
                     if (data == "[DONE]")
                     {
+                        Log("收到 SSE [DONE] 信号", LogLevel.Debug);
                         if (_isStreaming)
                             EnqueueChunk("", true);
                         else if (_responseTcs != null && _responseBuffer.Length > 0)
@@ -578,13 +579,21 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     }
                     else
                     {
-                        if (data.Contains("\"finish_reason\"") && data.Contains("\"stop\""))
+                        // 检查是否是结束信号（finish_reason 或 done）
+                        if (data.Contains("\"finish_reason\"") || data.Contains("\"done\"") || data.Contains("\"stop\"") || data.Contains("\"end_turn\""))
                         {
+                            Log($"收到结束信号: {data.Substring(0, Math.Min(100, data.Length))}", LogLevel.Debug);
                             if (_isStreaming)
                                 EnqueueChunk("", true);
                             else if (_responseTcs != null && _responseBuffer.Length > 0)
                                 _responseTcs.TrySetResult(_responseBuffer.ToString());
                             return;
+                        }
+                        
+                        // 记录提取失败，帮助调试
+                        if (_isStreaming && data.Length > 10)
+                        {
+                            Log($"内容提取为空: {data.Substring(0, Math.Min(100, data.Length))}", LogLevel.Debug);
                         }
                     }
                 }
