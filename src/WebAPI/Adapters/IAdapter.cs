@@ -20,7 +20,7 @@ namespace WebAPI.Adapters
         string GetDomControlScript(string prompt);
 
         /// <summary>将prompt注入到WebView2并触发发送</summary>
-        Task InjectPromptAsync(WebView2 webView, string prompt);
+        Task<string> InjectPromptAsync(WebView2 webView, string prompt);
 
         /// <summary>解析SSE数据，返回有效内容或null</summary>
         Common.SseParser.SseEvent? ParseSseData(string rawLine);
