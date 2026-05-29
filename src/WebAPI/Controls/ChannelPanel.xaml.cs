@@ -280,8 +280,8 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     string checkResult = await WebView.CoreWebView2.ExecuteScriptAsync(
                         "(function(){var t=document.title||'';" +
                         "if(t.includes('ERR_')||t.includes('无法访问')||t.includes('connect')||" +
-                        "t.includes('Problem')||t.includes('proxy')||t.includes('timeout')||" +
-                        "t.includes('没有')||t.includes('No internet')||t==='')return'error';return'ok';})()");
+                        "t.includes('Problem loading')||t.includes('proxy')||t.includes('timeout')||" +
+                        "t.includes('No internet')||t.includes('This site can'))return'error';return'ok';})()");
                     checkResult = checkResult.Trim('"');
 
                     if (checkResult == "error")
@@ -384,28 +384,34 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                 string dataStr = dataProp.GetString() ?? "";
                 if (string.IsNullOrEmpty(dataStr)) return;
 
-                Log($"[网络拦截] 收到数据: {(dataStr.Length > 200 ? dataStr.Substring(0, 200) + "..." : dataStr)}", LogLevel.Debug);
-
                 // === DeepSeek PoW 挑战捕获 ===
-                if (_powChallengeTcs != null && !_powChallengeTcs.Task.IsCompleted &&
-                    dataStr.Contains("create_pow_challenge"))
+                if (_powChallengeTcs != null && !_powChallengeTcs.Task.IsCompleted)
                 {
-                    var adapter = _adapter as DeepSeekAdapter;
-                    if (adapter != null)
+                    if (dataStr.Contains("create_pow_challenge") || dataStr.Contains("pow") || dataStr.Contains("challenge"))
                     {
-                        try
+                        Log($"[PoW检测] 疑似PoW数据: {dataStr.Substring(0, Math.Min(300, dataStr.Length))}", LogLevel.Info);
+                        
+                        var adapter = _adapter as DeepSeekAdapter;
+                        if (adapter != null)
                         {
-                            adapter.CapturePowChallenge(dataStr);
-
-                            if (adapter.CapturedPowChallenge != null)
+                            try
                             {
-                                Log($"PoW 挑战已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
-                                _powChallengeTcs.TrySetResult(adapter.CapturedPowChallenge);
+                                adapter.CapturePowChallenge(dataStr);
+
+                                if (adapter.CapturedPowChallenge != null)
+                                {
+                                    Log($"PoW 挑战已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
+                                    _powChallengeTcs.TrySetResult(adapter.CapturedPowChallenge);
+                                }
+                                else
+                                {
+                                    Log($"PoW 解析失败，CapturedPowChallenge 为 null", LogLevel.Warn);
+                                }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            Log($"解析 PoW 挑战失败: {ex.Message}", LogLevel.Error);
+                            catch (Exception ex)
+                            {
+                                Log($"解析 PoW 挑战失败: {ex.Message}", LogLevel.Error);
+                            }
                         }
                     }
                 }
@@ -454,11 +460,19 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                             Log($"累计收到内容: {_responseBuffer.Length} 字符", LogLevel.Debug);
                         }
                     }
+                    else
+                    {
+                        // 记录提取失败，帮助调试
+                        if (_isStreaming && dataStr.Length > 10)
+                        {
+                            Log($"内容提取为空: {dataStr.Substring(0, Math.Min(100, dataStr.Length))}", LogLevel.Debug);
+                        }
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Log($"解析网络数据出错: {ex.Message}", LogLevel.Debug);
+                Log($"解析网络数据出错: {ex.Message}", LogLevel.Error);
             }
         }
 
