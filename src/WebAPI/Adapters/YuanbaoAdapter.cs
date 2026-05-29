@@ -7,6 +7,8 @@ namespace WebAPI.Adapters
 {
     public class YuanbaoAdapter : IAdapter
     {
+        private readonly SseParser _sseParser = new();
+
         public string PlatformId => "yuanbao";
         public string PlatformName => "元宝增强";
         public string TargetUrl => "https://yuanbao.tencent.com/chat/";
@@ -268,9 +270,11 @@ namespace WebAPI.Adapters
             if (string.IsNullOrWhiteSpace(rawLine))
                 return null;
 
-            var parser = new SseParser();
+            var parser = _sseParser;
             return parser.Parse(rawLine);
         }
+
+        public void ResetSseParser() { _sseParser.Reset(); }
 
         public string GetModeSwitchScript(bool deepThink, bool search)
         {

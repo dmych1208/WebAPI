@@ -36,6 +36,8 @@ namespace WebAPI.Adapters
 
     public class DeepSeekAdapter : IAdapter
     {
+        private readonly SseParser _sseParser = new();
+
         public string PlatformId => "deepseek";
         public string PlatformName => "DeepSeek";
         public string TargetUrl => "https://chat.deepseek.com/";
@@ -404,9 +406,11 @@ namespace WebAPI.Adapters
             if (string.IsNullOrWhiteSpace(rawLine))
                 return null;
 
-            var parser = new SseParser();
+            var parser = _sseParser;
             return parser.Parse(rawLine);
         }
+
+        public void ResetSseParser() { _sseParser.Reset(); }
 
         public string GetModeSwitchScript(bool deepThink, bool search)
         {

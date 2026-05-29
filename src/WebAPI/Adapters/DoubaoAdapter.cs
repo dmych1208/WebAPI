@@ -7,6 +7,8 @@ namespace WebAPI.Adapters
 {
     public class DoubaoAdapter : IAdapter
     {
+        private readonly SseParser _sseParser = new();
+
         public string PlatformId => "doubao";
         public string PlatformName => "豆包";
         public string TargetUrl => "https://www.doubao.com/chat/";
@@ -310,9 +312,11 @@ namespace WebAPI.Adapters
             if (string.IsNullOrWhiteSpace(rawLine))
                 return null;
 
-            var parser = new SseParser();
+            var parser = _sseParser;
             return parser.Parse(rawLine);
         }
+
+        public void ResetSseParser() { _sseParser.Reset(); }
 
         public string GetModeSwitchScript(bool deepThink, bool search)
         {

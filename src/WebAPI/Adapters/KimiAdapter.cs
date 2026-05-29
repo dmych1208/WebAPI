@@ -15,6 +15,8 @@ namespace WebAPI.Adapters
 {
     public class KimiAdapter : IAdapter
     {
+        private readonly SseParser _sseParser = new();
+
         public string PlatformId => "kimi";
         public string PlatformName => "Kimi";
         public string TargetUrl => "https://www.kimi.com/";
@@ -518,9 +520,11 @@ namespace WebAPI.Adapters
         public Common.SseParser.SseEvent? ParseSseData(string rawLine)
         {
             if (string.IsNullOrWhiteSpace(rawLine)) return null;
-            var parser = new SseParser();
+            var parser = _sseParser;
             return parser.Parse(rawLine);
         }
+
+        public void ResetSseParser() { _sseParser.Reset(); }
 
         public string GetModeSwitchScript(bool deepThink, bool search)
         {

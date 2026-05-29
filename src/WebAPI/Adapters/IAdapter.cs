@@ -21,6 +21,8 @@ namespace WebAPI.Adapters
 
         Common.SseParser.SseEvent? ParseSseData(string rawLine);
 
+        void ResetSseParser() { }
+
         string GetModeSwitchScript(bool deepThink, bool search);
 
         string? ExtractContentFromSseData(string dataJson, string eventType);

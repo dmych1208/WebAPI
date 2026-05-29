@@ -359,7 +359,12 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
 
                 if (message.StartsWith("[NETWORK_DONE]"))
                 {
-                    if (!_isStreaming && _responseTcs != null && _responseBuffer.Length > 0)
+                    if (_isStreaming)
+                    {
+                        // 流式模式：发送结束信号
+                        EnqueueChunk("", true);
+                    }
+                    else if (_responseTcs != null && _responseBuffer.Length > 0)
                     {
                         _responseTcs.TrySetResult(_responseBuffer.ToString());
                     }
@@ -597,7 +602,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                             Log($"收到结束信号: {data.Substring(0, Math.Min(100, data.Length))}", LogLevel.Debug);
                             if (_isStreaming)
                                 EnqueueChunk("", true);
-                            else if (_responseTcs != null && _responseBuffer.Length > 0)
+                            else if (_responseTcs != null)
                                 _responseTcs.TrySetResult(_responseBuffer.ToString());
                             return;
                         }
@@ -711,6 +716,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
             _requestCts = new CancellationTokenSource();
             _responseBuffer.Clear();
             _responseTcs = new TaskCompletionSource<string>();
+            _adapter?.ResetSseParser();
             _streamStartTime = DateTime.Now;
 
             try
@@ -773,6 +779,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
             _requestCts = new CancellationTokenSource();
             _isStreaming = true;
             _responseBuffer.Clear();
+            _adapter?.ResetSseParser();
             _streamChunks = new ConcurrentQueue<(string text, bool isDone)>();
             _streamSignal = new SemaphoreSlim(0);
             _streamStartTime = DateTime.Now;
@@ -807,10 +814,23 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                         }
                     }
 
-                    // 超时检查
-                    if (!gotSignal || (DateTime.Now - _streamStartTime).TotalSeconds > 90)
+                    // 超时检查：gotSignal=false 表示 60s 内没收到任何新 chunk
+                    if (!gotSignal)
                     {
-                        Log("[流式] 超时或无更多数据", LogLevel.Warn);
+                        // 再检查一次队列（防止信号与数据的 TOCTOU 竞态）
+                        if (_streamChunks.TryDequeue(out var lastChunk))
+                        {
+                            if (!string.IsNullOrEmpty(lastChunk.text))
+                                streamCallback(lastChunk.text, false);
+                            if (lastChunk.isDone)
+                            {
+                                streamCallback("", true);
+                                Log($"[流式] 完成（超时兜底），总长度: {_responseBuffer.Length}", LogLevel.Info);
+                                return _responseBuffer.ToString();
+                            }
+                        }
+
+                        Log("[流式] 60秒无新数据，超时", LogLevel.Warn);
                         if (_responseBuffer.Length > 0)
                         {
                             streamCallback("", true);

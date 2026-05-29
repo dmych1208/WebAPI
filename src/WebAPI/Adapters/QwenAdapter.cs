@@ -7,6 +7,8 @@ namespace WebAPI.Adapters
 {
     public class QwenAdapter : IAdapter
     {
+        private readonly SseParser _sseParser = new();
+
         public string PlatformId => "qwen";
         public string PlatformName => "通义千问";
         public string TargetUrl => "https://tongyi.aliyun.com/qianwen/";
@@ -334,9 +336,11 @@ namespace WebAPI.Adapters
             if (string.IsNullOrWhiteSpace(rawLine))
                 return null;
 
-            var parser = new SseParser();
+            var parser = _sseParser;
             return parser.Parse(rawLine);
         }
+
+        public void ResetSseParser() { _sseParser.Reset(); }
 
         public string GetModeSwitchScript(bool deepThink, bool search)
         {
