@@ -34,6 +34,7 @@ namespace WebAPI.Controls
 
         private bool _deepThinkEnabled = false;
         private bool _searchEnabled = false;
+        private string? _lastModelId;
 
         private bool _controllerAvailable = false;
         private readonly List<string> _citations = new();
@@ -205,6 +206,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     await WebView.CoreWebView2.ExecuteScriptAsync(AntiDetectionScript);
                     WebView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
                     WebView.NavigationCompleted += WebView_NavigationCompleted;
+                    RegisterWebResourceEvents(WebView.CoreWebView2);
                     try
                     {
                         await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(_adapter.GetNetworkInterceptorScript());
@@ -241,6 +243,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
 
                 WebView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
                 WebView.NavigationCompleted += WebView_NavigationCompleted;
+                RegisterWebResourceEvents(WebView.CoreWebView2);
 
                 Log($"正在导航到 {_adapter.TargetUrl}...", LogLevel.Info);
                 WebView.Source = new Uri(_adapter.TargetUrl);
@@ -304,6 +307,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     Log("页面加载完成", LogLevel.Info);
                     try { await WebView.CoreWebView2.ExecuteScriptAsync(AntiDetectionScript); } catch { }
                     try { await WebView.CoreWebView2.ExecuteScriptAsync(_adapter!.GetDomControlScript("")); } catch { }
+                    try { await _adapter!.CapturePageAuthAsync(WebView); } catch { }
                 }
             }
             else
@@ -317,6 +321,21 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
             }
 
             _pageUsable = pageUsable;
+        }
+
+        private void RegisterWebResourceEvents(CoreWebView2 coreWebView)
+        {
+            if (_adapter == null) return;
+            if (!((IAdapter)_adapter).UsesWebResourceCapture) return;
+
+            string? filter = ((IAdapter)_adapter).WebResourceRequestedFilter;
+            if (!string.IsNullOrEmpty(filter))
+            {
+                coreWebView.AddWebResourceRequestedFilter(filter, CoreWebView2WebResourceContext.All);
+            }
+            coreWebView.WebResourceRequested += (s, e) => ((IAdapter)_adapter).OnWebResourceRequested(e);
+            coreWebView.WebResourceResponseReceived += (s, e) => ((IAdapter)_adapter).OnWebResourceResponseReceived(e);
+            Log("WebResource 事件已注册", LogLevel.Debug);
         }
 
         private void CoreWebView2_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -924,6 +943,29 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                 _powChallengeTcs = new TaskCompletionSource<DeepSeekPowChallenge>();
             }
 
+            // Kimi: 优先尝试 C# 直连请求，性能更高、可靠性更强
+            if (((IAdapter)_adapter!).CanSendDirectRequest)
+            {
+                try
+                {
+                    bool directOk = await ((IAdapter)_adapter).SendDirectRequestAsync(
+                        WebView, prompt, _lastModelId ?? "default",
+                        onData: rawData => ProcessNetworkData(rawData),
+                        onDone: () => { },
+                        onLog: msg => Log($"[直连] {msg}", LogLevel.Info));
+                    if (directOk)
+                    {
+                        Log("C# 直连请求成功", LogLevel.Info);
+                        return;
+                    }
+                    Log("C# 直连请求失败，降级到 DOM 注入", LogLevel.Warn);
+                }
+                catch (Exception ex)
+                {
+                    Log($"C# 直连请求异常: {ex.Message}，降级到 DOM 注入", LogLevel.Warn);
+                }
+            }
+
             int retryCount = 0;
             const int maxRetries = 2;
 
@@ -1439,6 +1481,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
 
         private async Task SwitchModeBeforePromptAsync(string modelId)
         {
+            _lastModelId = modelId;
             if (_adapter == null || WebView.CoreWebView2 == null) return;
 
             bool wantDeepThink = _deepThinkEnabled;

@@ -1,4 +1,12 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using WebAPI.Models;
 using WebAPI.Common;
@@ -13,6 +21,10 @@ namespace WebAPI.Adapters
         public int DefaultPort => 56670;
         public string UserDataFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Data", "Kimi");
 
+        bool IAdapter.UsesWebResourceCapture => true;
+        string? IAdapter.WebResourceRequestedFilter => "https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/Chat*";
+        bool IAdapter.CanSendDirectRequest => true;
+
         public List<ModelInfo> AvailableModels => new List<ModelInfo>
         {
             new ModelInfo { Id = "kimi-k2.5-fast", Name = "K2.5 快速" },
@@ -22,6 +34,216 @@ namespace WebAPI.Adapters
             new ModelInfo { Id = "kimi-k2.5-agent", Name = "K2.5 Agent" },
             new ModelInfo { Id = "kimi-k2.5-agent-swarm", Name = "K2.5 Agent 集群" }
         };
+
+        private byte[]? _latestChatRequestBodyBytes;
+        private string? _latestChatRequestUrl;
+        private string? _latestChatRequestMethod;
+        private Dictionary<string, string> _latestChatRequestHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private string? _latestChatRequestBody;
+        private string? _latestChatRequestPrompt;
+
+        private string? _pageAuthToken;
+        private string? _pageDeviceId;
+        private string? _pageLanguage;
+
+        bool IAdapter.IsChatEndpoint(string url)
+        {
+            string lower = (url ?? "").ToLower();
+            return lower.Contains("kimi.com/apiv2/kimi.gateway.chat.v1.chatservice/chat");
+        }
+
+        void IAdapter.OnWebResourceRequested(CoreWebView2WebResourceRequestedEventArgs e)
+        {
+            try
+            {
+                string url = e.Request.Uri ?? "";
+                string method = e.Request.Method ?? "";
+                if (!((IAdapter)this).IsChatEndpoint(url)) return;
+                if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)) return;
+
+                string bodyText = "";
+                try
+                {
+                    var content = e.Request.Content;
+                    if (content != null)
+                    {
+                        byte[] rawBytes;
+                        if (content.CanSeek) content.Position = 0;
+                        using (var ms = new MemoryStream())
+                        {
+                            content.CopyTo(ms);
+                            rawBytes = ms.ToArray();
+                        }
+                        if (content.CanSeek) content.Position = 0;
+                        bodyText = ExtractJsonPayloadFromConnectBody(rawBytes);
+                        _latestChatRequestBodyBytes = rawBytes;
+                    }
+                }
+                catch { }
+
+                _latestChatRequestHeaders.Clear();
+                try
+                {
+                    string[] headerNames = new[] {
+                        "authorization", "content-type", "accept", "accept-language",
+                        "x-traffic-id", "x-client-trace-id", "x-msh-device-id",
+                        "x-language", "user-agent"
+                    };
+                    foreach (var headerName in headerNames)
+                    {
+                        try
+                        {
+                            string value = e.Request.Headers.GetHeader(headerName) ?? "";
+                            if (!string.IsNullOrWhiteSpace(value))
+                                _latestChatRequestHeaders[headerName] = value;
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+
+                if (!string.IsNullOrWhiteSpace(bodyText))
+                {
+                    _latestChatRequestUrl = url;
+                    _latestChatRequestMethod = method;
+                    _latestChatRequestBody = bodyText;
+                    string? prompt = ExtractPromptFromTemplateBody(bodyText);
+                    if (!string.IsNullOrEmpty(prompt))
+                        _latestChatRequestPrompt = prompt;
+                }
+            }
+            catch { }
+        }
+
+        void IAdapter.OnWebResourceResponseReceived(CoreWebView2WebResourceResponseReceivedEventArgs e)
+        {
+            try
+            {
+                string url = e.Request.Uri ?? "";
+                string method = e.Request.Method ?? "";
+                if (!((IAdapter)this).IsChatEndpoint(url)) return;
+                if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)) return;
+            }
+            catch { }
+        }
+
+        async Task IAdapter.CapturePageAuthAsync(WebView2 webView)
+        {
+            if (webView.CoreWebView2 == null) return;
+            try
+            {
+                string script = @"
+(() => {
+    function collect(storage) {
+        const items = [];
+        try {
+            for (let i = 0; i < storage.length; i++) {
+                const key = storage.key(i);
+                items.push({ k: key, v: storage.getItem(key) || '' });
+            }
+        } catch (e) {}
+        return items;
+    }
+    const items = collect(window.localStorage).concat(collect(window.sessionStorage));
+    let token = '', deviceId = '', language = '';
+    for (const item of items) {
+        const key = (item.k || '').toLowerCase();
+        const value = item.v || '';
+        if (!token && /^eyJ[A-Za-z0-9_-]+\./.test(value)) token = value;
+        if (!token && (key.includes('token') || key.includes('auth')) && /^eyJ/.test(value)) token = value;
+        if (!deviceId && (key.includes('device') || key.includes('msh'))) deviceId = value;
+        if (!language && key.includes('lang')) language = value;
+    }
+    return JSON.stringify({ token: token, deviceId: deviceId, language: language });
+})();";
+                string result = await webView.CoreWebView2.ExecuteScriptAsync(script);
+                string json = DecodeScriptResult(result);
+                if (string.IsNullOrWhiteSpace(json)) return;
+                _pageAuthToken = ExtractValueFromJson(json, "token");
+                _pageDeviceId = ExtractValueFromJson(json, "deviceId");
+                _pageLanguage = ExtractValueFromJson(json, "language");
+            }
+            catch { }
+        }
+
+        async Task<bool> IAdapter.SendDirectRequestAsync(WebView2 webView, string prompt, string modelId,
+            Action<string> onData, Action onDone, Action<string> onLog)
+        {
+            try
+            {
+                string normalized = (modelId ?? "kimi-k2.5-fast").Trim().ToLower();
+                bool useThink = normalized.Contains("thinking") || normalized.Contains("think");
+                bool useSearch = normalized.Contains("search");
+
+                byte[] requestBytes = BuildDirectRequestBodyBytes(prompt, useThink, useSearch);
+                if (requestBytes == null || requestBytes.Length == 0)
+                {
+                    onLog("Direct request skipped: body build failed");
+                    return false;
+                }
+
+                string requestUrl = !string.IsNullOrWhiteSpace(_latestChatRequestUrl)
+                    ? _latestChatRequestUrl
+                    : "https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
+
+                onLog($"Direct request (C#): {requestUrl}");
+
+                var request = (HttpWebRequest)WebRequest.Create(requestUrl);
+                request.Method = string.IsNullOrWhiteSpace(_latestChatRequestMethod) ? "POST" : _latestChatRequestMethod;
+                request.ContentType = GetHeaderValue("content-type", "application/connect+json");
+                request.Accept = GetHeaderValue("accept", "*/*");
+                request.UserAgent = GetHeaderValue("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+                request.Referer = "https://www.kimi.com/";
+
+                await ApplyCookiesAsync(webView, request, requestUrl);
+
+                ApplyHeaderIfPresent(request, "authorization");
+                ApplyHeaderIfPresent(request, "accept-language");
+                ApplyHeaderIfPresent(request, "x-traffic-id");
+                ApplyHeaderIfPresent(request, "x-client-trace-id");
+                ApplyHeaderIfPresent(request, "x-msh-device-id");
+                ApplyHeaderIfPresent(request, "x-language");
+
+                using (var reqStream = await request.GetRequestStreamAsync())
+                {
+                    await reqStream.WriteAsync(requestBytes, 0, requestBytes.Length);
+                }
+
+                using (var response = (HttpWebResponse)await request.GetResponseAsync())
+                using (var respStream = response.GetResponseStream())
+                {
+                    if (respStream == null)
+                    {
+                        onLog("Direct request failed: empty response stream");
+                        return false;
+                    }
+
+                    string contentType = (response.ContentType ?? "").ToLower();
+                    if (contentType.Contains("application/connect+json"))
+                    {
+                        await ProcessConnectJsonResponseAsync(respStream, onData);
+                    }
+                    else
+                    {
+                        using (var reader = new StreamReader(respStream, Encoding.UTF8))
+                        {
+                            string text = await reader.ReadToEndAsync();
+                            if (!string.IsNullOrWhiteSpace(text))
+                                onData(text.EndsWith("\n") ? text : text + "\n");
+                        }
+                    }
+                }
+
+                onDone();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                onLog($"Direct request failed: {ex.Message}, fallback to UI");
+                return false;
+            }
+        }
 
         public string GetNetworkInterceptorScript()
         {
@@ -289,16 +511,13 @@ namespace WebAPI.Adapters
         {
             if (webView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 未初始化");
-
             string script = GetDomControlScript(prompt);
             await webView.CoreWebView2.ExecuteScriptAsync(script);
         }
 
         public Common.SseParser.SseEvent? ParseSseData(string rawLine)
         {
-            if (string.IsNullOrWhiteSpace(rawLine))
-                return null;
-
+            if (string.IsNullOrWhiteSpace(rawLine)) return null;
             var parser = new SseParser();
             return parser.Parse(rawLine);
         }
@@ -310,7 +529,6 @@ namespace WebAPI.Adapters
             return $@"
 (async () => {{
     function sleep(ms) {{ return new Promise(r => setTimeout(r, ms)); }}
-
     var buttons = document.querySelectorAll('div[role=""button""]');
     for (var i = 0; i < buttons.length; i++) {{
         var btn = buttons[i];
@@ -322,7 +540,6 @@ namespace WebAPI.Adapters
             break;
         }}
     }}
-
     if ({srFlag}) {{
         var searchBtn = null;
         for (var j = 0; j < buttons.length; j++) {{
@@ -348,7 +565,6 @@ namespace WebAPI.Adapters
         public string? ExtractContentFromSseData(string dataJson, string eventType)
         {
             if (string.IsNullOrEmpty(dataJson)) return null;
-
             try
             {
                 var data = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(dataJson);
@@ -359,23 +575,19 @@ namespace WebAPI.Adapters
 
                 if (string.Equals(messageType, "THINK", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (data.TryGetProperty("content", out var tcProp))
-                        return tcProp.GetString();
+                    if (data.TryGetProperty("content", out var tcProp)) return tcProp.GetString();
                 }
                 if (string.Equals(messageType, "RESPONSE", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (data.TryGetProperty("content", out var rcProp))
-                        return rcProp.GetString();
+                    if (data.TryGetProperty("content", out var rcProp)) return rcProp.GetString();
                 }
 
                 if (data.TryGetProperty("p", out var pProp) && data.TryGetProperty("v", out var vProp))
                 {
                     string p = pProp.GetString() ?? "";
                     string v = vProp.GetString() ?? "";
-                    if (p.Contains("response/fragments/") && p.Contains("/content"))
-                        return v;
-                    if (p.Contains("/text/content") || p.Contains("text.content"))
-                        return v;
+                    if (p.Contains("response/fragments/") && p.Contains("/content")) return v;
+                    if (p.Contains("/text/content") || p.Contains("text.content")) return v;
                 }
 
                 if (data.TryGetProperty("mask", out var maskProp))
@@ -385,8 +597,7 @@ namespace WebAPI.Adapters
                     {
                         if (data.TryGetProperty("text", out var textObj))
                         {
-                            if (textObj.TryGetProperty("content", out var tcProp2))
-                                return tcProp2.GetString();
+                            if (textObj.TryGetProperty("content", out var tcProp2)) return tcProp2.GetString();
                         }
                     }
                 }
@@ -396,8 +607,7 @@ namespace WebAPI.Adapters
                     var firstChoice = choicesProp.EnumerateArray().FirstOrDefault();
                     if (firstChoice.TryGetProperty("delta", out var deltaProp))
                     {
-                        if (deltaProp.TryGetProperty("content", out var dcProp))
-                            return dcProp.GetString();
+                        if (deltaProp.TryGetProperty("content", out var dcProp)) return dcProp.GetString();
                     }
                 }
 
@@ -407,18 +617,201 @@ namespace WebAPI.Adapters
                     return vProp2.GetString();
             }
             catch { }
-
             return null;
         }
 
-        private string EscapeForJs(string str)
+        // --- Private helpers for WebResource capture & direct request ---
+
+        private static string ExtractJsonPayloadFromConnectBody(byte[] rawBytes)
         {
-            return str.Replace("\\", "\\\\")
-                      .Replace("'", "\\'")
-                      .Replace("\"", "\\\"")
-                      .Replace("\n", "\\n")
-                      .Replace("\r", "\\r")
-                      .Replace("\t", "\\t");
+            if (rawBytes == null || rawBytes.Length == 0) return "";
+            if (rawBytes.Length >= 5)
+            {
+                int length = (rawBytes[1] << 24) | (rawBytes[2] << 16) | (rawBytes[3] << 8) | rawBytes[4];
+                if (length >= 0 && 5 + length <= rawBytes.Length)
+                    return Encoding.UTF8.GetString(rawBytes, 5, length);
+            }
+            return Encoding.UTF8.GetString(rawBytes);
+        }
+
+        private byte[] BuildDirectRequestBodyBytes(string prompt, bool useThink, bool useSearch)
+        {
+            if (_latestChatRequestBodyBytes == null || _latestChatRequestBodyBytes.Length == 0)
+                return BuildColdStartDirectRequestBodyBytes(prompt, useThink, useSearch);
+
+            string oldPromptEscaped = EscapeJson(_latestChatRequestPrompt ?? "");
+            string newPromptEscaped = EscapeJson(prompt ?? "");
+            string body = _latestChatRequestBody ?? "";
+
+            if (!string.IsNullOrWhiteSpace(oldPromptEscaped))
+                body = body.Replace(oldPromptEscaped, newPromptEscaped);
+
+            body = Regex.Replace(body, "\"thinking\"\\s*:\\s*(true|false)", "\"thinking\":" + (useThink ? "true" : "false"));
+
+            if (!useSearch)
+                body = Regex.Replace(body, ",?\\s*\\{\\s*\"type\"\\s*:\\s*\"TOOL_TYPE_SEARCH\"\\s*,\\s*\"search\"\\s*:\\s*\\{\\s*\\}\\s*\\}", "");
+            else if (!body.Contains("\"TOOL_TYPE_SEARCH\""))
+                body = body.Replace("\"tools\":[]", "\"tools\":[{\"type\":\"TOOL_TYPE_SEARCH\",\"search\":{}}]");
+
+            byte[] payloadBytes = Encoding.UTF8.GetBytes(body);
+
+            if (_latestChatRequestBodyBytes.Length >= 5)
+            {
+                byte[] framedBytes = new byte[payloadBytes.Length + 5];
+                framedBytes[0] = _latestChatRequestBodyBytes[0];
+                framedBytes[1] = (byte)((payloadBytes.Length >> 24) & 0xFF);
+                framedBytes[2] = (byte)((payloadBytes.Length >> 16) & 0xFF);
+                framedBytes[3] = (byte)((payloadBytes.Length >> 8) & 0xFF);
+                framedBytes[4] = (byte)(payloadBytes.Length & 0xFF);
+                Buffer.BlockCopy(payloadBytes, 0, framedBytes, 5, payloadBytes.Length);
+                return framedBytes;
+            }
+            return payloadBytes;
+        }
+
+        private byte[] BuildColdStartDirectRequestBodyBytes(string prompt, bool useThink, bool useSearch)
+        {
+            string escapedPrompt = EscapeJson(prompt ?? "");
+            string toolsJson = useSearch ? "[{\"type\":\"TOOL_TYPE_SEARCH\",\"search\":{}}]" : "[]";
+            string payload = "{" +
+                "\"scenario\":\"SCENARIO_K2D5\"," +
+                "\"tools\":" + toolsJson + "," +
+                "\"message\":{" +
+                    "\"role\":\"user\"," +
+                    "\"blocks\":[{\"message_id\":\"\",\"text\":{\"content\":\"" + escapedPrompt + "\"}}]," +
+                    "\"scenario\":\"SCENARIO_K2D5\"" +
+                "}," +
+                "\"options\":{\"thinking\":" + (useThink ? "true" : "false") + "}" +
+            "}";
+
+            byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
+            byte[] framedBytes = new byte[payloadBytes.Length + 5];
+            framedBytes[0] = 0x00;
+            framedBytes[1] = (byte)((payloadBytes.Length >> 24) & 0xFF);
+            framedBytes[2] = (byte)((payloadBytes.Length >> 16) & 0xFF);
+            framedBytes[3] = (byte)((payloadBytes.Length >> 8) & 0xFF);
+            framedBytes[4] = (byte)(payloadBytes.Length & 0xFF);
+            Buffer.BlockCopy(payloadBytes, 0, framedBytes, 5, payloadBytes.Length);
+            return framedBytes;
+        }
+
+        private string ExtractPromptFromTemplateBody(string bodyText)
+        {
+            if (string.IsNullOrWhiteSpace(bodyText)) return "";
+            var roleContentRegex = new Regex("\"role\"\\s*:\\s*\"user\"[\\s\\S]*?\"content\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            var match = roleContentRegex.Match(bodyText);
+            if (match.Success) return UnescapeJson(match.Groups[1].Value);
+            var promptRegex = new Regex("\"prompt\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            match = promptRegex.Match(bodyText);
+            if (match.Success) return UnescapeJson(match.Groups[1].Value);
+            return "";
+        }
+
+        private string GetHeaderValue(string name, string fallback)
+        {
+            if (_latestChatRequestHeaders.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value))
+                return value;
+            if (string.Equals(name, "authorization", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_pageAuthToken))
+                return "Bearer " + _pageAuthToken;
+            if (string.Equals(name, "x-msh-device-id", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_pageDeviceId))
+                return _pageDeviceId;
+            if (string.Equals(name, "x-language", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_pageLanguage))
+                return _pageLanguage;
+            return fallback;
+        }
+
+        private void ApplyHeaderIfPresent(HttpWebRequest request, string name)
+        {
+            string? value;
+            if (!_latestChatRequestHeaders.TryGetValue(name, out value) || string.IsNullOrWhiteSpace(value))
+            {
+                value = GetHeaderValue(name, "");
+                if (string.IsNullOrWhiteSpace(value)) return;
+            }
+            request.Headers[name] = value;
+        }
+
+        private async Task ApplyCookiesAsync(WebView2 webView, HttpWebRequest request, string requestUrl)
+        {
+            if (webView.CoreWebView2 == null) return;
+            try
+            {
+                var cookies = await webView.CoreWebView2.CookieManager.GetCookiesAsync(requestUrl);
+                if (cookies == null || cookies.Count == 0) return;
+                request.CookieContainer = new CookieContainer();
+                foreach (var cookie in cookies)
+                {
+                    try
+                    {
+                        var netCookie = new Cookie(cookie.Name, cookie.Value, cookie.Path, cookie.Domain);
+                        if (cookie.Expires > DateTime.MinValue) netCookie.Expires = cookie.Expires;
+                        netCookie.HttpOnly = cookie.IsHttpOnly;
+                        netCookie.Secure = cookie.IsSecure;
+                        request.CookieContainer.Add(netCookie);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private async Task ProcessConnectJsonResponseAsync(Stream respStream, Action<string> onData)
+        {
+            using (var ms = new MemoryStream())
+            {
+                await respStream.CopyToAsync(ms);
+                byte[] data = ms.ToArray();
+                int offset = 0;
+                while (offset + 5 <= data.Length)
+                {
+                    byte flags = data[offset];
+                    int length = (data[offset + 1] << 24) | (data[offset + 2] << 16) | (data[offset + 3] << 8) | data[offset + 4];
+                    if (length < 0 || offset + 5 + length > data.Length) break;
+                    string frameText = Encoding.UTF8.GetString(data, offset + 5, length);
+                    if ((flags & 0x02) == 0x02)
+                    {
+                        offset += 5 + length;
+                        continue;
+                    }
+                    if (!string.IsNullOrWhiteSpace(frameText))
+                        onData(frameText.EndsWith("\n") ? frameText : frameText + "\n");
+                    offset += 5 + length;
+                }
+            }
+        }
+
+        // --- JSON helpers ---
+
+        private string DecodeScriptResult(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw) || raw == "null") return "";
+            string text = raw;
+            if (text.Length >= 2 && text[0] == '"' && text[text.Length - 1] == '"')
+                text = text.Substring(1, text.Length - 2);
+            return UnescapeJson(text);
+        }
+
+        private static string ExtractValueFromJson(string json, string key)
+        {
+            var regex = new Regex($"\"{key}\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            var match = regex.Match(json);
+            if (match.Success) return UnescapeJson(match.Groups[1].Value);
+            return null!;
+        }
+
+        private static string EscapeJson(string str)
+        {
+            return str.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+        }
+
+        private static string UnescapeJson(string str)
+        {
+            return str.Replace("\\\"", "\"").Replace("\\\\", "\\").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
+        }
+
+        private static string EscapeForJs(string str)
+        {
+            return str.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
         }
     }
 }

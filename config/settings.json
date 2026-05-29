@@ -24,7 +24,8 @@
       "models": [
         { "id": "qwen-turbo", "name": "千问加速" },
         { "id": "qwen-plus", "name": "千问增强" },
-        { "id": "qwen-max", "name": "千问旗舰" }
+        { "id": "qwen-max", "name": "千问旗舰" },
+        { "id": "qwen-max-long", "name": "千问长文本" }
       ]
     },
     {
@@ -36,7 +37,8 @@
       "icon": "🫘",
       "models": [
         { "id": "doubao-pro", "name": "豆包Pro" },
-        { "id": "doubao-lite", "name": "豆包Lite" }
+        { "id": "doubao-lite", "name": "豆包Lite" },
+        { "id": "doubao-role", "name": "豆包角色" }
       ]
     },
     {
