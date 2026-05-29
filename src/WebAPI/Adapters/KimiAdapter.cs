@@ -27,6 +27,16 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
+    function sendToBridge(text) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(text);
+        }
+    }
+
+    function log(msg) {
+        sendToBridge('[LOG] ' + msg);
+    }
+
     var kimiGetUrlInfo = function(rawUrl) {
         try {
             var parsed = new URL(rawUrl, window.location.origin);
@@ -37,10 +47,11 @@ namespace WebAPI.Adapters
     };
 
     var kimiShouldCapture = function(url, method) {
-        var info = kimiGetUrlInfo(url);
         if ((method || 'GET').toUpperCase() !== 'POST') return false;
-        if (info.hostname !== 'www.kimi.com' && info.hostname !== 'kimi.com') return false;
-        return info.pathname.indexOf('/apiv2/kimi.gateway.chat.v1.chatservice/chat') !== -1;
+        var info = kimiGetUrlInfo(url);
+        if (info.hostname.indexOf('kimi.moonshot.cn') !== -1 || info.hostname.indexOf('moonshot.cn') !== -1 || info.hostname.indexOf('kimi.com') !== -1) return true;
+        if (info.pathname.indexOf('/apiv2/kimi.gateway.chat.v1.chatservice/chat') !== -1) return true;
+        return false;
     };
 
     var kimiConcatBytes = function(left, right) {
@@ -71,9 +82,9 @@ namespace WebAPI.Adapters
             var reader = clone.body && clone.body.getReader ? clone.body.getReader() : null;
             if (!reader) {
                 var text = await clone.text();
-                if (text && window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DATA', url: url, data: text + '\n' }));
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DONE', url: url }));
+                if (text) {
+                    sendToBridge('[NETWORK_DATA]' + text + '\n');
+                    sendToBridge('[NETWORK_DONE]');
                 }
                 return;
             }
@@ -90,28 +101,24 @@ namespace WebAPI.Adapters
                     parsed.frames.forEach(function(frame) {
                         if ((frame.flags & 0x02) === 0x02) return;
                         var text = decoder.decode(frame.payload);
-                        if (text && window.chrome && window.chrome.webview) {
-                            window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DATA', url: url, data: text + '\n' }));
+                        if (text) {
+                            sendToBridge('[NETWORK_DATA]' + text + '\n');
                         }
                     });
                 }
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DONE', url: url }));
-                }
+                sendToBridge('[NETWORK_DONE]');
                 return;
             }
             var decoder = new TextDecoder();
             while (true) {
                 var readResult = await reader.read();
                 if (readResult.done) {
-                    if (window.chrome && window.chrome.webview) {
-                        window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DONE', url: url }));
-                    }
+                    sendToBridge('[NETWORK_DONE]');
                     break;
                 }
                 var text = decoder.decode(readResult.value, { stream: true });
-                if (text && window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DATA', url: url, data: text }));
+                if (text) {
+                    sendToBridge('[NETWORK_DATA]' + text);
                 }
             }
         } catch (e) {}
@@ -155,9 +162,7 @@ namespace WebAPI.Adapters
                 var lastLen = xhr._lastLength || 0;
                 var newChunk = fullText.substring(lastLen);
                 if (newChunk.length > 0) {
-                    if (window.chrome && window.chrome.webview) {
-                        window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DATA', url: url, data: newChunk }));
-                    }
+                    sendToBridge('[NETWORK_DATA]' + newChunk);
                     xhr._lastLength = fullText.length;
                 }
             } catch(e) {}
@@ -169,21 +174,39 @@ namespace WebAPI.Adapters
                     var lastLen = xhr._lastLength || 0;
                     var newChunk = fullText.substring(lastLen);
                     if (newChunk.length > 0) {
-                        if (window.chrome && window.chrome.webview) {
-                            window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DATA', url: url, data: newChunk }));
-                        }
+                        sendToBridge('[NETWORK_DATA]' + newChunk);
                         xhr._lastLength = fullText.length;
                     }
                 } catch(e) {}
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'NETWORK_DONE', url: url }));
-                }
+                sendToBridge('[NETWORK_DONE]');
             }
         });
         return xhr;
     };
 
-    console.log('[KimiAdapter] 网络拦截已启用(Fetch+XHR+connect+json)');
+    const OriginalEventSource = window.EventSource;
+    window.EventSource = function(url, config) {
+        const es = new OriginalEventSource(url, config);
+        const origAddEventListener = es.addEventListener;
+        es.addEventListener = function(type, listener, options) {
+            const wrappedListener = function(event) {
+                sendToBridge('[NETWORK_DATA]' + ('event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'));
+                if (listener) listener.call(this, event);
+            };
+            return origAddEventListener.call(this, type, wrappedListener, options);
+        };
+        let _onmessage = null, _onopen = null, _onerror = null;
+        Object.defineProperty(es, 'onmessage', { get: function() { return _onmessage; }, set: function(fn) { _onmessage = fn; if (fn) es.addEventListener('message', fn); } });
+        Object.defineProperty(es, 'onopen', { get: function() { return _onopen; }, set: function(fn) { _onopen = fn; if (fn) es.addEventListener('open', fn); } });
+        Object.defineProperty(es, 'onerror', { get: function() { return _onerror; }, set: function(fn) { _onerror = fn; if (fn) es.addEventListener('error', fn); } });
+        return es;
+    };
+    Object.defineProperty(window.EventSource, 'prototype', { value: OriginalEventSource.prototype });
+    window.EventSource.CONNECTING = OriginalEventSource.CONNECTING;
+    window.EventSource.OPEN = OriginalEventSource.OPEN;
+    window.EventSource.CLOSED = OriginalEventSource.CLOSED;
+
+    log('KimiAdapter 网络拦截已启用(Fetch+XHR+EventSource+connect+json)');
 })();
 ";
         }

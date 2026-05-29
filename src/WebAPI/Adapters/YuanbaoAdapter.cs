@@ -24,18 +24,27 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
+    function sendToBridge(text) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(text);
+        }
+    }
+
+    function log(msg) {
+        sendToBridge('[LOG] ' + msg);
+    }
+
     const originalFetch = window.fetch;
 
     function isChatResponse(url) {
         if (typeof url !== 'string') return false;
-        if (url.includes('yuanbao.tencent.com') || url.includes('hunyuan.cloud.tencent.com')) return true;
-        if (!url.includes('/api/') && !url.includes('/chat/') && !url.includes('/stream/') && !url.includes('/v1/')) return false;
-        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
-        if (isStatic) return false;
-        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
-        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
-        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
-        return true;
+        var u = url.toLowerCase();
+        if (u.indexOf('yuanbao.tencent.com') !== -1 || u.indexOf('hunyuan.cloud.tencent.com') !== -1) {
+            var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+            if (isStatic) return false;
+            return true;
+        }
+        return false;
     }
 
     window.fetch = async function(...args) {
@@ -43,33 +52,20 @@ namespace WebAPI.Adapters
         try {
             const response = await originalFetch.apply(this, args);
 
-            if (isChatResponse(url)) {
+            if (isChatResponse(url) && response.body) {
                 const clone = response.clone();
                 (async () => {
                     try {
-                        if (clone.body) {
-                            const reader = clone.body.getReader();
-                            const decoder = new TextDecoder();
-                            while (true) {
-                                var result = await reader.read();
-                                if (result.done) {
-                                    if (window.chrome && window.chrome.webview) {
-                                        window.chrome.webview.postMessage(JSON.stringify({
-                                            type: 'NETWORK_DONE',
-                                            url: url
-                                        }));
-                                    }
-                                    break;
-                                }
-                                var chunk = decoder.decode(result.value, { stream: true });
-                                if (window.chrome && window.chrome.webview) {
-                                    window.chrome.webview.postMessage(JSON.stringify({
-                                        type: 'NETWORK_DATA',
-                                        url: url,
-                                        data: chunk
-                                    }));
-                                }
+                        const reader = clone.body.getReader();
+                        const decoder = new TextDecoder();
+                        while (true) {
+                            var result = await reader.read();
+                            if (result.done) {
+                                sendToBridge('[NETWORK_DONE]');
+                                break;
                             }
+                            var chunk = decoder.decode(result.value, { stream: true });
+                            sendToBridge('[NETWORK_DATA]' + chunk);
                         }
                     } catch (e) {}
                 })();
@@ -81,19 +77,47 @@ namespace WebAPI.Adapters
         }
     };
 
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        let url = '';
+        const originalOpen = xhr.open;
+        xhr.open = function(method, requestUrl) {
+            url = requestUrl || '';
+            return originalOpen.apply(this, arguments);
+        };
+
+        xhr.addEventListener('progress', function() {
+            if (!isChatResponse(url)) return;
+            try {
+                let fullText = '';
+                try { fullText = xhr.responseText; } catch(e) { return; }
+                if (!fullText) return;
+                const lastLen = xhr._lastLength || 0;
+                const newChunk = fullText.substring(lastLen);
+                if (newChunk.length > 0) {
+                    sendToBridge('[NETWORK_DATA]' + newChunk);
+                    xhr._lastLength = fullText.length;
+                }
+            } catch(e) {}
+        });
+
+        xhr.addEventListener('load', function() {
+            if (isChatResponse(url)) {
+                sendToBridge('[NETWORK_DONE]');
+            }
+        });
+
+        return xhr;
+    };
+
     const OriginalEventSource = window.EventSource;
     window.EventSource = function(url, config) {
         const es = new OriginalEventSource(url, config);
         const origAddEventListener = es.addEventListener;
         es.addEventListener = function(type, listener, options) {
             const wrappedListener = function(event) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'
-                    }));
-                }
+                sendToBridge('[NETWORK_DATA]' + ('event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'));
                 if (listener) listener.call(this, event);
             };
             return origAddEventListener.call(this, type, wrappedListener, options);
@@ -109,7 +133,7 @@ namespace WebAPI.Adapters
     window.EventSource.OPEN = OriginalEventSource.OPEN;
     window.EventSource.CLOSED = OriginalEventSource.CLOSED;
 
-    console.log('[YuanbaoAdapter] 网络拦截已启用(Fetch+EventSource)');
+    log('YuanbaoAdapter 网络拦截已启用(Fetch+XHR+EventSource)');
 })();
 ";
         }

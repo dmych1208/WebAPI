@@ -47,10 +47,16 @@
       "targetUrl": "https://gemini.google.com/",
       "icon": "✂️",
       "models": [
-        { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" },
-        { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
-        { "id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash" }
-      ]
+        { "id": "gemini-web-api", "name": "Gemini Web API" },
+        { "id": "gemini-thinking", "name": "Gemini Thinking" },
+        { "id": "gemini-3.1-flash", "name": "Gemini 3.1 Flash" },
+        { "id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+        { "id": "gemini-3.1-image", "name": "Gemini 3.1 Image" },
+        { "id": "gemini-3.1-flash-image", "name": "Gemini 3.1 Flash Image" },
+        { "id": "gemini-3.1-pro-image", "name": "Gemini 3.1 Pro Image" }
+      ],
+      "imageCacheMaxMB": 512,
+      "imageSaveDirectory": "C:\\Users\\Administrator\\Downloads\\GeminiWebRelay"
     },
     {
       "id": "grok",
@@ -60,9 +66,10 @@
       "targetUrl": "https://grok.com/",
       "icon": "🤖",
       "models": [
-        { "id": "grok-4", "name": "Grok 4" },
-        { "id": "grok-4-thinking", "name": "Grok 4 Thinking" },
-        { "id": "grok-3", "name": "Grok 3" }
+        { "id": "grok-auto", "name": "Grok Auto" },
+        { "id": "grok-fast", "name": "Grok Fast" },
+        { "id": "grok-expert", "name": "Grok Expert" },
+        { "id": "grok-heavy", "name": "Grok Heavy" }
       ]
     },
     {

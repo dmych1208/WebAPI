@@ -15,26 +15,25 @@ namespace WebAPI.Adapters
 
         public List<ModelInfo> AvailableModels => new List<ModelInfo>
         {
-            new ModelInfo { Id = "grok-4", Name = "Grok 4" },
-            new ModelInfo { Id = "grok-4-thinking", Name = "Grok 4 Thinking" },
-            new ModelInfo { Id = "grok-3", Name = "Grok 3" }
+            new ModelInfo { Id = "grok-auto", Name = "Grok Auto" },
+            new ModelInfo { Id = "grok-fast", Name = "Grok Fast" },
+            new ModelInfo { Id = "grok-expert", Name = "Grok Expert" },
+            new ModelInfo { Id = "grok-heavy", Name = "Grok Heavy" }
         };
 
         public string GetNetworkInterceptorScript()
         {
             return @"
 (() => {
+    function sendToBridge(prefix, text) { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(prefix + text); }
+    function log(msg) { sendToBridge('[LOG] ', msg); }
+
     const originalFetch = window.fetch;
 
     function isChatResponse(url) {
         if (typeof url !== 'string') return false;
-        if (url.includes('grok.com') || url.includes('x.ai') || url.includes('x.com/grok')) return true;
-        if (!url.includes('/api/') && !url.includes('/chat/') && !url.includes('/stream/') && !url.includes('/v1/')) return false;
-        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico|webp|mp4|mp3|wav|ogg|pdf|zip|gz)$/);
         if (isStatic) return false;
-        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
-        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
-        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
         return true;
     }
 
@@ -44,33 +43,24 @@ namespace WebAPI.Adapters
             const response = await originalFetch.apply(this, args);
 
             if (isChatResponse(url)) {
-                const clone = response.clone();
-                (async () => {
-                    const reader = clone.body.getReader();
-                    const decoder = new TextDecoder();
-                    try {
-                        while (true) {
-                            const result = await reader.read();
-                            if (result.done) break;
-                            const chunk = decoder.decode(result.value, { stream: true });
-                            if (window.chrome && window.chrome.webview) {
-                                window.chrome.webview.postMessage(JSON.stringify({
-                                    type: 'NETWORK_DATA',
-                                    url: url,
-                                    data: chunk
-                                }));
+                if (response.body) {
+                    const clone = response.clone();
+                    (async () => {
+                        try {
+                            const reader = clone.body.getReader();
+                            const decoder = new TextDecoder();
+                            while (true) {
+                                var result = await reader.read();
+                                if (result.done) {
+                                    sendToBridge('[NETWORK_DONE]', '');
+                                    break;
+                                }
+                                var chunk = decoder.decode(result.value, { stream: true });
+                                sendToBridge('[NETWORK_DATA]', chunk);
                             }
-                        }
-                    } catch (e) {
-                    } finally {
-                        if (window.chrome && window.chrome.webview) {
-                            window.chrome.webview.postMessage(JSON.stringify({
-                                type: 'NETWORK_DONE',
-                                url: url
-                            }));
-                        }
-                    }
-                })();
+                        } catch (e) {}
+                    })();
+                }
             }
 
             return response;
@@ -79,19 +69,47 @@ namespace WebAPI.Adapters
         }
     };
 
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        let url = '';
+        const originalOpen = xhr.open;
+        xhr.open = function(method, requestUrl) {
+            url = requestUrl || '';
+            return originalOpen.apply(this, arguments);
+        };
+
+        xhr.addEventListener('progress', function() {
+            if (!isChatResponse(url)) return;
+            try {
+                let fullText = '';
+                try { fullText = xhr.responseText; } catch(e) { return; }
+                if (!fullText) return;
+                const lastLen = xhr._lastLength || 0;
+                const newChunk = fullText.substring(lastLen);
+                if (newChunk.length > 0) {
+                    sendToBridge('[NETWORK_DATA]', newChunk);
+                    xhr._lastLength = fullText.length;
+                }
+            } catch(e) {}
+        });
+
+        xhr.addEventListener('load', function() {
+            if (isChatResponse(url)) {
+                sendToBridge('[NETWORK_DONE]', '');
+            }
+        });
+
+        return xhr;
+    };
+
     const OriginalEventSource = window.EventSource;
     window.EventSource = function(url, config) {
         const es = new OriginalEventSource(url, config);
         const origAddEventListener = es.addEventListener;
         es.addEventListener = function(type, listener, options) {
             const wrappedListener = function(event) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'
-                    }));
-                }
+                sendToBridge('[NETWORK_DATA]', 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n');
                 if (listener) listener.call(this, event);
             };
             return origAddEventListener.call(this, type, wrappedListener, options);
@@ -107,7 +125,7 @@ namespace WebAPI.Adapters
     window.EventSource.OPEN = OriginalEventSource.OPEN;
     window.EventSource.CLOSED = OriginalEventSource.CLOSED;
 
-    console.log('[GrokAdapter] 网络拦截已启用(Fetch+EventSource)');
+    log('GrokAdapter 网络拦截已启用(Fetch+XHR+EventSource)');
 })();
 ";
         }

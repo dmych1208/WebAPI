@@ -15,26 +15,28 @@ namespace WebAPI.Adapters
 
         public List<ModelInfo> AvailableModels => new List<ModelInfo>
         {
-            new ModelInfo { Id = "gemini-2.5-pro", Name = "Gemini 2.5 Pro" },
-            new ModelInfo { Id = "gemini-2.5-flash", Name = "Gemini 2.5 Flash" },
-            new ModelInfo { Id = "gemini-2.0-flash", Name = "Gemini 2.0 Flash" }
+            new ModelInfo { Id = "gemini-web-api", Name = "Gemini Web API" },
+            new ModelInfo { Id = "gemini-thinking", Name = "Gemini Thinking" },
+            new ModelInfo { Id = "gemini-3.1-flash", Name = "Gemini 3.1 Flash" },
+            new ModelInfo { Id = "gemini-3.1-pro", Name = "Gemini 3.1 Pro" },
+            new ModelInfo { Id = "gemini-3.1-image", Name = "Gemini 3.1 Image" },
+            new ModelInfo { Id = "gemini-3.1-flash-image", Name = "Gemini 3.1 Flash Image" },
+            new ModelInfo { Id = "gemini-3.1-pro-image", Name = "Gemini 3.1 Pro Image" }
         };
 
         public string GetNetworkInterceptorScript()
         {
             return @"
 (() => {
+    function sendToBridge(prefix, text) { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(prefix + text); }
+    function log(msg) { sendToBridge('[LOG] ', msg); }
+
     const originalFetch = window.fetch;
 
     function isChatResponse(url) {
         if (typeof url !== 'string') return false;
-        if (url.includes('googleapis.com') || url.includes('gemini.google.com')) return true;
-        if (!url.includes('/api/') && !url.includes('/chat/') && !url.includes('/stream/') && !url.includes('/v1/')) return false;
-        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico|webp|mp4|mp3|wav|ogg|pdf|zip|gz)$/);
         if (isStatic) return false;
-        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
-        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
-        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
         return true;
     }
 
@@ -53,22 +55,11 @@ namespace WebAPI.Adapters
                             while (true) {
                                 var result = await reader.read();
                                 if (result.done) {
-                                    if (window.chrome && window.chrome.webview) {
-                                        window.chrome.webview.postMessage(JSON.stringify({
-                                            type: 'NETWORK_DONE',
-                                            url: url
-                                        }));
-                                    }
+                                    sendToBridge('[NETWORK_DONE]', '');
                                     break;
                                 }
                                 var chunk = decoder.decode(result.value, { stream: true });
-                                if (window.chrome && window.chrome.webview) {
-                                    window.chrome.webview.postMessage(JSON.stringify({
-                                        type: 'NETWORK_DATA',
-                                        url: url,
-                                        data: chunk
-                                    }));
-                                }
+                                sendToBridge('[NETWORK_DATA]', chunk);
                             }
                         } catch (e) {}
                     })();
@@ -100,13 +91,7 @@ namespace WebAPI.Adapters
                 const lastLen = xhr._lastLength || 0;
                 const newChunk = fullText.substring(lastLen);
                 if (newChunk.length > 0) {
-                    if (window.chrome && window.chrome.webview) {
-                        window.chrome.webview.postMessage(JSON.stringify({
-                            type: 'NETWORK_DATA',
-                            url: url,
-                            data: newChunk
-                        }));
-                    }
+                    sendToBridge('[NETWORK_DATA]', newChunk);
                     xhr._lastLength = fullText.length;
                 }
             } catch(e) {}
@@ -114,12 +99,7 @@ namespace WebAPI.Adapters
 
         xhr.addEventListener('load', function() {
             if (isChatResponse(url)) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DONE',
-                        url: url
-                    }));
-                }
+                sendToBridge('[NETWORK_DONE]', '');
             }
         });
 
@@ -132,13 +112,7 @@ namespace WebAPI.Adapters
         const origAddEventListener = es.addEventListener;
         es.addEventListener = function(type, listener, options) {
             const wrappedListener = function(event) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'
-                    }));
-                }
+                sendToBridge('[NETWORK_DATA]', 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n');
                 if (listener) listener.call(this, event);
             };
             return origAddEventListener.call(this, type, wrappedListener, options);
@@ -163,7 +137,7 @@ namespace WebAPI.Adapters
     window.EventSource.OPEN = OriginalEventSource.OPEN;
     window.EventSource.CLOSED = OriginalEventSource.CLOSED;
 
-    console.log('[GeminiAdapter] 网络拦截已启用(Fetch+XHR+EventSource)');
+    log('GeminiAdapter 网络拦截已启用(Fetch+XHR+EventSource)');
 })();
 ";
         }

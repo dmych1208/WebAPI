@@ -179,7 +179,48 @@
                          TextWrapping="NoWrap"/>
             </StackPanel>
 
-            <!-- ⑤ 代理设置（仅国外渠道显示） -->
+            <!-- ⑤ Gemini 图片设置（仅Gemini渠道显示） -->
+            <StackPanel x:Name="ImageSettingsPanel" Margin="0,0,0,8" Visibility="Collapsed">
+                <Separator Background="{StaticResource BorderGray}"/>
+                <TextBlock Text="🖼 图片设置" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource AccentBlue}" Margin="0,8,0,4"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="缓存上限(MB):" FontSize="11" 
+                               Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                    <TextBox Grid.Column="1" x:Name="TxtImageCacheMB" Height="24" Margin="4,0,0,0"
+                             FontFamily="Consolas" FontSize="11" Padding="4,2"
+                             Background="{StaticResource BgInput}" Foreground="{StaticResource TextPrimary}"
+                             BorderBrush="{StaticResource BorderGray}" VerticalContentAlignment="Center"/>
+                </Grid>
+                <Grid Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="保存目录:" FontSize="11" 
+                               Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                    <TextBox Grid.Column="1" x:Name="TxtImageSaveDir" Height="24" Margin="4,0,0,0"
+                             FontFamily="Consolas" FontSize="11" Padding="4,2"
+                             Background="{StaticResource BgInput}" Foreground="{StaticResource TextPrimary}"
+                             BorderBrush="{StaticResource BorderGray}" VerticalContentAlignment="Center"/>
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                    <Button x:Name="BtnApplyImageSettings" Content="应用图片设置" Height="28"
+                            FontSize="11" Cursor="Hand" Padding="8,3"
+                            Background="{StaticResource AccentBlue}" BorderBrush="Transparent"
+                            Foreground="White" Click="BtnApplyImageSettings_Click"/>
+                    <Button x:Name="BtnOpenImageDir" Content="打开图片目录" Height="28" Margin="4,0,0,0"
+                            FontSize="11" Cursor="Hand" Padding="8,3"
+                            Background="Transparent" BorderBrush="{StaticResource BorderGray}"
+                            Foreground="{StaticResource AccentGreen}" Click="BtnOpenImageDir_Click"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ⑥ 代理设置（仅国外渠道显示） -->
             <StackPanel x:Name="ProxyPanel" Margin="0,0,0,8" Visibility="Collapsed">
                 <Separator Background="{StaticResource BorderGray}"/>
                 <Button x:Name="BtnProxySettings" Content="🛡 代理设置" Height="32"
@@ -189,7 +230,7 @@
                         Click="BtnProxySettings_Click"/>
             </StackPanel>
 
-            <!-- ⑥ 操作按钮 -->
+            <!-- ⑦ 操作按钮 -->
             <StackPanel Margin="0,0,0,8">
                 <Button x:Name="BtnRestartBrowser" Content="🔄 重启浏览器内核" Height="32"
                         FontSize="12" Cursor="Hand"

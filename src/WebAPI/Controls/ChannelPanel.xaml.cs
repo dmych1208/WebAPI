@@ -84,6 +84,13 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
 
             if (_config.Id is "gemini" or "grok")
                 ProxyPanel.Visibility = Visibility.Visible;
+
+            if (_config.Id == "gemini")
+            {
+                ImageSettingsPanel.Visibility = Visibility.Visible;
+                TxtImageCacheMB.Text = _config.ImageCacheMaxMB.ToString();
+                TxtImageSaveDir.Text = _config.ImageSaveDirectory;
+            }
         }
 
         private void ChannelPanel_Loaded(object sender, RoutedEventArgs e)
@@ -318,21 +325,20 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
             {
                 string message = e.TryGetWebMessageAsString();
 
-                if (message.Length > 300)
-                    Log($"收到 WebMessage: {message.Substring(0, 300)}...", LogLevel.Debug);
-                else
-                    Log($"收到 WebMessage: {message}", LogLevel.Debug);
-
-                // === 网络拦截数据（流式和非流式都处理）===
-                // 优先处理 NETWORK_DATA，因为 PoW 也可能在其中
-                if (message.Contains("NETWORK_DATA"))
+                if (message.StartsWith("[LOG]"))
                 {
-                    ProcessNetworkData(message);
+                    Log($"[JS] {message.Substring(5).Trim()}", LogLevel.Debug);
                     return;
                 }
 
-                // === NETWORK_DONE：非流式时结束响应 ===
-                if (message.Contains("NETWORK_DONE"))
+                if (message.StartsWith("[NETWORK_DATA]"))
+                {
+                    string rawData = message.Substring("[NETWORK_DATA]".Length);
+                    ProcessNetworkData(rawData);
+                    return;
+                }
+
+                if (message.StartsWith("[NETWORK_DONE]"))
                 {
                     if (!_isStreaming && _responseTcs != null && _responseBuffer.Length > 0)
                     {
@@ -341,26 +347,11 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     return;
                 }
 
-                // === 非流式 fallback：从 WebMessage 提取内容 ===
-                if (!_isStreaming && _responseTcs != null)
+                // 旧格式兼容: JSON 格式 {type:"NETWORK_DATA", data:"..."}
+                if (message.Contains("NETWORK_DATA"))
                 {
-                    var content = ExtractContentFromMessage(message);
-                    if (!string.IsNullOrEmpty(content))
-                    {
-                        _responseBuffer.Append(content);
-                        Log($"累计收到内容: {_responseBuffer.Length} 字符", LogLevel.Debug);
-                    }
-
-                    if (message.Contains("\"stop\"") || message.Contains("\"done\"") ||
-                        message.Contains("NETWORK_DONE"))
-                    {
-                        _responseTcs.TrySetResult(_responseBuffer.ToString());
-                    }
-                    else if ((DateTime.Now - _streamStartTime).TotalSeconds > 5 && _responseBuffer.Length > 0)
-                    {
-                        // 超时但有内容，返回已有内容
-                        _responseTcs.TrySetResult(_responseBuffer.ToString());
-                    }
+                    ProcessNetworkData(message);
+                    return;
                 }
             }
             catch (Exception ex)
@@ -372,45 +363,57 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
         private DateTime _streamStartTime;
 
         /// <summary>
-        /// 处理网络拦截数据，提取有效内容并推入流式队列
+        /// 处理网络拦截数据，推入流式队列
+        /// 新格式: rawData = 纯文本（[NETWORK_DATA] 前缀已剥离）
+        /// 旧格式兼容: JSON {type:"NETWORK_DATA", data:"..."}
         /// </summary>
-        private void ProcessNetworkData(string message)
+        private void ProcessNetworkData(string rawData)
         {
             try
             {
-                var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(message);
-                if (!json.TryGetProperty("data", out var dataProp)) return;
+                string dataStr;
 
-                string dataStr = dataProp.GetString() ?? "";
+                // 旧 JSON 格式兼容
+                if (rawData.StartsWith("{"))
+                {
+                    try
+                    {
+                        var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(rawData);
+                        if (!json.TryGetProperty("data", out var dataProp)) return;
+                        dataStr = dataProp.GetString() ?? "";
+                    }
+                    catch { return; }
+                }
+                else
+                {
+                    dataStr = rawData;
+                }
+
                 if (string.IsNullOrEmpty(dataStr)) return;
+
+                Log($"[网截] {(dataStr.Length > 120 ? dataStr.Substring(0, 120) + "..." : dataStr)}", LogLevel.Debug);
 
                 // === DeepSeek PoW 挑战捕获 ===
                 if (_powChallengeTcs != null && !_powChallengeTcs.Task.IsCompleted)
                 {
-                    if (dataStr.Contains("create_pow_challenge") || dataStr.Contains("pow") || dataStr.Contains("challenge"))
+                    if (dataStr.Contains("create_pow_challenge") || dataStr.Contains("\"challenge\"") || dataStr.Contains("DeepSeekHashV1"))
                     {
-                        Log($"[PoW检测] 疑似PoW数据: {dataStr.Substring(0, Math.Min(300, dataStr.Length))}", LogLevel.Info);
-                        
+                        Log($"[PoW检测] {dataStr.Substring(0, Math.Min(300, dataStr.Length))}", LogLevel.Info);
                         var adapter = _adapter as DeepSeekAdapter;
                         if (adapter != null)
                         {
                             try
                             {
                                 adapter.CapturePowChallenge(dataStr);
-
                                 if (adapter.CapturedPowChallenge != null)
                                 {
-                                    Log($"PoW 挑战已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
+                                    Log($"PoW 已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
                                     _powChallengeTcs.TrySetResult(adapter.CapturedPowChallenge);
-                                }
-                                else
-                                {
-                                    Log($"PoW 解析失败，CapturedPowChallenge 为 null", LogLevel.Warn);
                                 }
                             }
                             catch (Exception ex)
                             {
-                                Log($"解析 PoW 挑战失败: {ex.Message}", LogLevel.Error);
+                                Log($"PoW 解析失败: {ex.Message}", LogLevel.Error);
                             }
                         }
                     }
@@ -421,7 +424,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     dataStr.Contains("query_rewrite") ||
                     dataStr.Contains("search_query"))
                 {
-                    Log("过滤非聊天响应(搜索重写器)", LogLevel.Debug);
+                    Log("过滤:搜索重写器", LogLevel.Debug);
                     return;
                 }
 
@@ -436,9 +439,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                     string? content = null;
 
                     if (_adapter != null)
-                    {
                         content = _adapter.ExtractContentFromSseData(dataStr, "");
-                    }
 
                     if (content == null)
                         content = SseParser.ExtractContent(dataStr);
@@ -448,7 +449,7 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                         if (content.Contains("AI question rephraser") ||
                             content.Contains("rephrase the follow-up"))
                         {
-                            Log("过滤非聊天内容(搜索重写器)", LogLevel.Debug);
+                            Log("过滤:搜索重写器", LogLevel.Debug);
                             return;
                         }
 
@@ -457,22 +458,14 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                         else
                         {
                             _responseBuffer.Append(content);
-                            Log($"累计收到内容: {_responseBuffer.Length} 字符", LogLevel.Debug);
-                        }
-                    }
-                    else
-                    {
-                        // 记录提取失败，帮助调试
-                        if (_isStreaming && dataStr.Length > 10)
-                        {
-                            Log($"内容提取为空: {dataStr.Substring(0, Math.Min(100, dataStr.Length))}", LogLevel.Debug);
+                            Log($"累计: {_responseBuffer.Length} 字符", LogLevel.Debug);
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log($"解析网络数据出错: {ex.Message}", LogLevel.Error);
+                Log($"ProcessNetworkData 出错: {ex.Message}", LogLevel.Debug);
             }
         }
 
@@ -1187,6 +1180,53 @@ window.dispatchEvent(new Event('DOMContentLoaded'));
                 _config.ProxySettings = dialog.Settings;
                 OnProxySettingsChanged?.Invoke();
                 Log($"代理配置已更新（启用={_config.ProxySettings.Enabled}，节点数={_config.ProxySettings.Nodes.Count}）", LogLevel.Info);
+            }
+        }
+
+        private void BtnApplyImageSettings_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (int.TryParse(TxtImageCacheMB.Text, out int cacheMB) && cacheMB > 0)
+                    _config.ImageCacheMaxMB = cacheMB;
+                else
+                {
+                    Log("请输入有效的缓存上限(MB)", LogLevel.Warn);
+                    return;
+                }
+
+                string dir = TxtImageSaveDir.Text.Trim();
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    try { Directory.CreateDirectory(dir); }
+                    catch (Exception ex) { Log($"创建目录失败: {ex.Message}", LogLevel.Warn); }
+                    _config.ImageSaveDirectory = dir;
+                }
+
+                OnProxySettingsChanged?.Invoke();
+                Log($"图片设置已应用: 缓存={_config.ImageCacheMaxMB}MB, 目录={_config.ImageSaveDirectory}", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                Log($"应用图片设置失败: {ex.Message}", LogLevel.Error);
+            }
+        }
+
+        private void BtnOpenImageDir_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string dir = _config.ImageSaveDirectory;
+                if (!Directory.Exists(dir))
+                {
+                    try { Directory.CreateDirectory(dir); }
+                    catch { }
+                }
+                System.Diagnostics.Process.Start("explorer.exe", dir);
+            }
+            catch (Exception ex)
+            {
+                Log($"打开图片目录失败: {ex.Message}", LogLevel.Error);
             }
         }
 

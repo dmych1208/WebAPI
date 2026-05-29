@@ -24,16 +24,27 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
+    function sendToBridge(text) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(text);
+        }
+    }
+
+    function log(msg) {
+        sendToBridge('[LOG] ' + msg);
+    }
+
     const originalFetch = window.fetch;
 
     function isChatResponse(url) {
         if (typeof url !== 'string') return false;
-        if (url.includes('volcengine') || url.includes('ark') || url.includes('doubao')) return true;
-        if (!url.includes('/api/') && !url.includes('/chat/') && !url.includes('completion') && !url.includes('stream')) return false;
-        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
-        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
-        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
-        return true;
+        var u = url.toLowerCase();
+        if (u.indexOf('doubao.com') !== -1 || u.indexOf('volcengine.com') !== -1 || u.indexOf('ark.') !== -1) {
+            var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+            if (isStatic) return false;
+            return true;
+        }
+        return false;
     }
 
     window.fetch = async function(...args) {
@@ -41,37 +52,23 @@ namespace WebAPI.Adapters
         try {
             const response = await originalFetch.apply(this, args);
 
-            if (isChatResponse(url)) {
-                if (response.body) {
-                    const clone = response.clone();
-                    (async () => {
-                        try {
-                            const reader = clone.body.getReader();
-                            const decoder = new TextDecoder();
-                            while (true) {
-                                const result = await reader.read();
-                                if (result.done) {
-                                    if (window.chrome && window.chrome.webview) {
-                                        window.chrome.webview.postMessage(JSON.stringify({
-                                            type: 'NETWORK_DONE',
-                                            url: url
-                                        }));
-                                    }
-                                    break;
-                                }
-                                const chunk = decoder.decode(result.value, { stream: true });
-                                if (window.chrome && window.chrome.webview) {
-                                    window.chrome.webview.postMessage(JSON.stringify({
-                                        type: 'NETWORK_DATA',
-                                        url: url,
-                                        data: chunk
-                                    }));
-                                }
+            if (isChatResponse(url) && response.body) {
+                const clone = response.clone();
+                (async () => {
+                    try {
+                        const reader = clone.body.getReader();
+                        const decoder = new TextDecoder();
+                        while (true) {
+                            var result = await reader.read();
+                            if (result.done) {
+                                sendToBridge('[NETWORK_DONE]');
+                                break;
                             }
-                        } catch (e) {
+                            var chunk = decoder.decode(result.value, { stream: true });
+                            sendToBridge('[NETWORK_DATA]' + chunk);
                         }
-                    })();
-                }
+                    } catch (e) {}
+                })();
             }
 
             return response;
@@ -80,7 +77,63 @@ namespace WebAPI.Adapters
         }
     };
 
-    console.log('[DoubaoAdapter] 网络拦截已启用(流式)');
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        let url = '';
+        const originalOpen = xhr.open;
+        xhr.open = function(method, requestUrl) {
+            url = requestUrl || '';
+            return originalOpen.apply(this, arguments);
+        };
+
+        xhr.addEventListener('progress', function() {
+            if (!isChatResponse(url)) return;
+            try {
+                let fullText = '';
+                try { fullText = xhr.responseText; } catch(e) { return; }
+                if (!fullText) return;
+                const lastLen = xhr._lastLength || 0;
+                const newChunk = fullText.substring(lastLen);
+                if (newChunk.length > 0) {
+                    sendToBridge('[NETWORK_DATA]' + newChunk);
+                    xhr._lastLength = fullText.length;
+                }
+            } catch(e) {}
+        });
+
+        xhr.addEventListener('load', function() {
+            if (isChatResponse(url)) {
+                sendToBridge('[NETWORK_DONE]');
+            }
+        });
+
+        return xhr;
+    };
+
+    const OriginalEventSource = window.EventSource;
+    window.EventSource = function(url, config) {
+        const es = new OriginalEventSource(url, config);
+        const origAddEventListener = es.addEventListener;
+        es.addEventListener = function(type, listener, options) {
+            const wrappedListener = function(event) {
+                sendToBridge('[NETWORK_DATA]' + ('event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'));
+                if (listener) listener.call(this, event);
+            };
+            return origAddEventListener.call(this, type, wrappedListener, options);
+        };
+        let _onmessage = null, _onopen = null, _onerror = null;
+        Object.defineProperty(es, 'onmessage', { get: function() { return _onmessage; }, set: function(fn) { _onmessage = fn; if (fn) es.addEventListener('message', fn); } });
+        Object.defineProperty(es, 'onopen', { get: function() { return _onopen; }, set: function(fn) { _onopen = fn; if (fn) es.addEventListener('open', fn); } });
+        Object.defineProperty(es, 'onerror', { get: function() { return _onerror; }, set: function(fn) { _onerror = fn; if (fn) es.addEventListener('error', fn); } });
+        return es;
+    };
+    Object.defineProperty(window.EventSource, 'prototype', { value: OriginalEventSource.prototype });
+    window.EventSource.CONNECTING = OriginalEventSource.CONNECTING;
+    window.EventSource.OPEN = OriginalEventSource.OPEN;
+    window.EventSource.CLOSED = OriginalEventSource.CLOSED;
+
+    log('DoubaoAdapter 网络拦截已启用(Fetch+XHR+EventSource)');
 })();
 ";
         }

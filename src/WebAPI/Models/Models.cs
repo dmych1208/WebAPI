@@ -12,6 +12,10 @@ namespace WebAPI.Models
         public string UserDataFolder { get; set; } = "";
         public ProxySettings? ProxySettings { get; set; }
         public List<ModelInfo> Models { get; set; } = new();
+        /// <summary>图片缓存上限(MB)，仅 Gemini 有效</summary>
+        public int ImageCacheMaxMB { get; set; } = 512;
+        /// <summary>图片保存目录，仅 Gemini 有效</summary>
+        public string ImageSaveDirectory { get; set; } = @"C:\Users\Administrator\Downloads\GeminiWebRelay";
     }
 
     /// <summary>模型信息</summary>

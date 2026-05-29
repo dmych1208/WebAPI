@@ -59,87 +59,110 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
-    console.log('[DeepSeekAdapter] 网络拦截脚本开始加载...');
     const originalFetch = window.fetch;
+    const DOMAIN = 'chat.deepseek.com';
 
-    function isChatResponse(url) {
+    function shouldIntercept(url) {
         if (typeof url !== 'string') return false;
-        if (!url.includes('/api/') && !url.includes('/chat/')) return false;
-        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
-        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
-        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
-        return true;
+        if (url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/)) return false;
+        if (url.indexOf(DOMAIN) !== -1) return true;
+        if (url.startsWith('/api/') || url.startsWith('/chat/') || url.startsWith('/v1/')) return true;
+        return false;
     }
 
-    function sendToBridge(type, url, data) {
+    function log(msg) {
         if (window.chrome && window.chrome.webview) {
-            window.chrome.webview.postMessage(JSON.stringify({ type: type, url: url, data: data }));
+            window.chrome.webview.postMessage('[LOG] ' + msg);
         }
     }
 
     window.fetch = async function(...args) {
-        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-        console.log('[DeepSeekAdapter] fetch:', url);
-        try {
-            const response = await originalFetch.apply(this, args);
-
-            if (isChatResponse(url) && response.body) {
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+        if (shouldIntercept(url)) {
+            log('Fetch: ' + url);
+            try {
+                const response = await originalFetch.apply(this, args);
                 const clone = response.clone();
                 const reader = clone.body.getReader();
                 const decoder = new TextDecoder();
                 (async () => {
                     try {
-                        console.log('[DeepSeekAdapter] 开始读取响应流...');
                         while (true) {
-                            var result = await reader.read();
-                            if (result.done) {
-                                console.log('[DeepSeekAdapter] 响应流读取完成');
-                                sendToBridge('NETWORK_DONE', url, '');
+                            const { done, value } = await reader.read();
+                            if (done) {
+                                if (window.chrome && window.chrome.webview) {
+                                    window.chrome.webview.postMessage('[NETWORK_DONE]');
+                                }
                                 break;
                             }
-                            var chunk = decoder.decode(result.value, { stream: true });
-                            sendToBridge('NETWORK_DATA', url, chunk);
+                            const text = decoder.decode(value, { stream: true });
+                            if (window.chrome && window.chrome.webview) {
+                                window.chrome.webview.postMessage('[NETWORK_DATA]' + text);
+                            }
                         }
-                    } catch (e) {
-                        console.error('[DeepSeekAdapter] 读取流异常:', e);
-                    }
+                    } catch (e) { log('Fetch Stream Error: ' + e); }
                 })();
+                return response;
+            } catch (e) {
+                log('Fetch Error: ' + e);
+                return originalFetch.apply(this, args);
             }
-
-            return response;
-        } catch (err) {
-            console.error('[DeepSeekAdapter] fetch异常:', err);
-            return originalFetch.apply(this, args);
         }
+        return originalFetch.apply(this, args);
     };
 
-    console.log('[DeepSeekAdapter] fetch拦截已设置');
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        let url = '';
+        const originalOpen = xhr.open;
+        xhr.open = function(method, requestUrl) {
+            url = requestUrl || '';
+            if (shouldIntercept(url)) log('XHR: ' + url);
+            return originalOpen.apply(this, arguments);
+        };
+        xhr.addEventListener('progress', function() {
+            if (!shouldIntercept(url)) return;
+            try {
+                let fullText = '';
+                try { fullText = xhr.responseText; } catch(e) { return; }
+                if (!fullText) return;
+                const lastLen = xhr._lastLength || 0;
+                const newChunk = fullText.substring(lastLen);
+                if (newChunk.length > 0) {
+                    if (window.chrome && window.chrome.webview) {
+                        window.chrome.webview.postMessage('[NETWORK_DATA]' + newChunk);
+                    }
+                    xhr._lastLength = fullText.length;
+                }
+            } catch(e) {}
+        });
+        xhr.addEventListener('load', function() {
+            if (shouldIntercept(url) && window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage('[NETWORK_DONE]');
+            }
+        });
+        return xhr;
+    };
 
     const OriginalEventSource = window.EventSource;
     window.EventSource = function(url, config) {
-        console.log('[DeepSeekAdapter] 创建EventSource:', url);
+        log('EventSource: ' + url);
         const es = new OriginalEventSource(url, config);
         const origAddEventListener = es.addEventListener;
         es.addEventListener = function(type, listener, options) {
             const wrappedListener = function(event) {
-                const msgData = 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n';
-                sendToBridge('NETWORK_DATA', url, msgData);
+                if (window.chrome && window.chrome.webview) {
+                    window.chrome.webview.postMessage('[NETWORK_DATA]event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n');
+                }
                 if (listener) listener.call(this, event);
             };
             return origAddEventListener.call(this, type, wrappedListener, options);
         };
-        let _onmessage = null, _onopen = null, _onerror = null;
+        let _onmessage = null;
         Object.defineProperty(es, 'onmessage', {
             get: function() { return _onmessage; },
             set: function(fn) { _onmessage = fn; if (fn) es.addEventListener('message', fn); }
-        });
-        Object.defineProperty(es, 'onopen', {
-            get: function() { return _onopen; },
-            set: function(fn) { _onopen = fn; if (fn) es.addEventListener('open', fn); }
-        });
-        Object.defineProperty(es, 'onerror', {
-            get: function() { return _onerror; },
-            set: function(fn) { _onerror = fn; if (fn) es.addEventListener('error', fn); }
         });
         return es;
     };
@@ -148,7 +171,7 @@ namespace WebAPI.Adapters
     window.EventSource.OPEN = OriginalEventSource.OPEN;
     window.EventSource.CLOSED = OriginalEventSource.CLOSED;
 
-    console.log('[DeepSeekAdapter] 网络拦截已完全启用');
+    log('网络拦截已启用 (Fetch+XHR+EventSource)');
 })();
 ";
         }

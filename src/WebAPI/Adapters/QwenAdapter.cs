@@ -25,19 +25,32 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
+    function sendToBridge(text) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(text);
+        }
+    }
+
+    function log(msg) {
+        sendToBridge('[LOG] ' + msg);
+    }
+
     const originalFetch = window.fetch;
 
     function isChatResponse(url) {
         if (typeof url !== 'string') return false;
         var u = url.toLowerCase();
-        if (u.indexOf('tongyi.aliyun.com') !== -1) return true;
-        if (!u.includes('/api/') && !u.includes('/chat/') && !u.includes('/qianwen/') && !u.includes('/stream/') && !u.includes('/v1/')) return false;
-        var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
-        if (isStatic) return false;
-        if (u.includes('rephrase') || u.includes('rewrite') || u.includes('search_query') || u.includes('query_rewrite')) return false;
-        if (u.includes('suggest') || u.includes('recommend') || u.includes('feedback') || u.includes('log')) return false;
-        if (u.includes('config') || u.includes('setting') || u.includes('abtest') || u.includes('feature')) return false;
-        return true;
+        if (u.indexOf('qianwen.aliyun.com') !== -1 || u.indexOf('tongyi.aliyun.com') !== -1) {
+            var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+            if (isStatic) return false;
+            return true;
+        }
+        if (u.indexOf('/api/') !== -1 || u.indexOf('/chat/') !== -1 || u.indexOf('/qianwen/') !== -1 || u.indexOf('/stream/') !== -1 || u.indexOf('/v1/') !== -1) {
+            var isStatic = url.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|ico)$/);
+            if (isStatic) return false;
+            return true;
+        }
+        return false;
     }
 
     window.fetch = async function(...args) {
@@ -54,22 +67,11 @@ namespace WebAPI.Adapters
                         while (true) {
                             var result = await reader.read();
                             if (result.done) {
-                                if (window.chrome && window.chrome.webview) {
-                                    window.chrome.webview.postMessage(JSON.stringify({
-                                        type: 'NETWORK_DONE',
-                                        url: url
-                                    }));
-                                }
+                                sendToBridge('[NETWORK_DONE]');
                                 break;
                             }
                             var chunk = decoder.decode(result.value, { stream: true });
-                            if (window.chrome && window.chrome.webview) {
-                                window.chrome.webview.postMessage(JSON.stringify({
-                                    type: 'NETWORK_DATA',
-                                    url: url,
-                                    data: chunk
-                                }));
-                            }
+                            sendToBridge('[NETWORK_DATA]' + chunk);
                         }
                     } catch (e) {}
                 })();
@@ -100,13 +102,7 @@ namespace WebAPI.Adapters
                 const lastLen = xhr._lastLength || 0;
                 const newChunk = fullText.substring(lastLen);
                 if (newChunk.length > 0) {
-                    if (window.chrome && window.chrome.webview) {
-                        window.chrome.webview.postMessage(JSON.stringify({
-                            type: 'NETWORK_DATA',
-                            url: url,
-                            data: newChunk
-                        }));
-                    }
+                    sendToBridge('[NETWORK_DATA]' + newChunk);
                     xhr._lastLength = fullText.length;
                 }
             } catch(e) {}
@@ -114,12 +110,7 @@ namespace WebAPI.Adapters
 
         xhr.addEventListener('load', function() {
             if (isChatResponse(url)) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DONE',
-                        url: url
-                    }));
-                }
+                sendToBridge('[NETWORK_DONE]');
             }
         });
 
@@ -132,13 +123,7 @@ namespace WebAPI.Adapters
         const origAddEventListener = es.addEventListener;
         es.addEventListener = function(type, listener, options) {
             const wrappedListener = function(event) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'
-                    }));
-                }
+                sendToBridge('[NETWORK_DATA]' + ('event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n'));
                 if (listener) listener.call(this, event);
             };
             return origAddEventListener.call(this, type, wrappedListener, options);
@@ -176,7 +161,7 @@ namespace WebAPI.Adapters
         observer.observe(document.body, { childList: true, subtree: true });
     }, 1000);
 
-    console.log('[QwenAdapter] 网络拦截已启用(Fetch+XHR+EventSource)');
+    log('QwenAdapter 网络拦截已启用(Fetch+XHR+EventSource)');
 })();
 ";
         }
