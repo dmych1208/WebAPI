@@ -1,0 +1,47 @@
+{
+  "channels": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "enabled": true,
+      "port": 55555,
+      "targetUrl": "https://chat.deepseek.com/",
+      "icon": "💬",
+      "models": [
+        { "id": "deepseek-chat", "name": "标准对话(极速)" },
+        { "id": "deepseek-chat-search", "name": "联网对话(搜索)" },
+        { "id": "deepseek-reasoner", "name": "深度思考(R1)" },
+        { "id": "deepseek-reasoner-search", "name": "R1联网(弱)" }
+      ]
+    },
+    {
+      "id": "qwen",
+      "name": "通义千问",
+      "enabled": true,
+      "port": 56666,
+      "targetUrl": "https://qianwen.aliyun.com/",
+      "icon": "🔮",
+      "models": [
+        { "id": "qwen-turbo", "name": "千问加速" },
+        { "id": "qwen-plus", "name": "千问增强" },
+        { "id": "qwen-max", "name": "千问旗舰" }
+      ]
+    },
+    {
+      "id": "doubao",
+      "name": "豆包",
+      "enabled": true,
+      "port": 55556,
+      "targetUrl": "https://www.doubao.com/",
+      "icon": "🫘",
+      "models": [
+        { "id": "doubao-pro", "name": "豆包Pro" },
+        { "id": "doubao-lite", "name": "豆包Lite" }
+      ]
+    }
+  ],
+  "logging": {
+    "level": "info",
+    "keepDays": 30
+  }
+}

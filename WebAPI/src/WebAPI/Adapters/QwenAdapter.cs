@@ -45,25 +45,6 @@ namespace WebAPI.Adapters
         }
     }
 
-    function hideAds() {
-        const style = document.createElement('style');
-        style.textContent = `
-            .bg-pc-sidebar.pr-20px.pl-16px.py-16px.border-line-parting.border.rounded-12.gap-16px.justify-between.items-center.max-w-\\\\[620px\\\\].min-w-\\\\[438px\\\\].w-full.flex.relative.group,
-            .bg-pc-sidebar,
-            [class*=""bg-pc-sidebar""] { display: none !important; }
-        `;
-        document.head.appendChild(style);
-
-        document.querySelectorAll('.bg-pc-sidebar, [class*=""bg-pc-sidebar""]').forEach(el => {
-            el.style.display = 'none';
-        });
-    }
-
-    hideAds();
-
-    const observer = new MutationObserver(() => { hideAds(); });
-    observer.observe(document.body, { childList: true, subtree: true });
-
     window.fetch = async function(...args) {
         const url = args[0];
         try {
@@ -313,14 +294,13 @@ namespace WebAPI.Adapters
             return script;
         }
 
-        public async Task<string> InjectPromptAsync(WebView2 webView, string prompt)
+        public async Task InjectPromptAsync(WebView2 webView, string prompt)
         {
             if (webView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 未初始化");
 
             string script = GetDomControlScript(prompt);
-            string result = await webView.CoreWebView2.ExecuteScriptAsync(script);
-            return result; // 返回 JSON 结果
+            await webView.CoreWebView2.ExecuteScriptAsync(script);
         }
 
         public Common.SseParser.SseEvent? ParseSseData(string rawLine)

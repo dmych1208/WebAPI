@@ -264,14 +264,13 @@ namespace WebAPI.Adapters
             return script;
         }
 
-        public async Task<string> InjectPromptAsync(WebView2 webView, string prompt)
+        public async Task InjectPromptAsync(WebView2 webView, string prompt)
         {
             if (webView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 未初始化");
 
             string script = GetDomControlScript(prompt);
-            string result = await webView.CoreWebView2.ExecuteScriptAsync(script);
-            return result;
+            await webView.CoreWebView2.ExecuteScriptAsync(script);
         }
 
         public Common.SseParser.SseEvent? ParseSseData(string rawLine)

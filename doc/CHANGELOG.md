@@ -4,21 +4,24 @@
 
 ### 新增
 
-- **DeepSeek 渠道**
-  - 支持 deepseek-chat 标准对话
-  - 支持 deepseek-reasoner 深度思考模式
-  - 支持 deepseek-chat-search 联网搜索
+- **DeepSeek 渠道** ✅ 实测验证
+  - 支持 `deepseek-chat` 标准对话（✅ 实测可用）
+  - 支持 `deepseek-reasoner` 深度思考模式（✅ 实测可用）
+  - 支持 `deepseek-chat-search` 联网搜索（✅ 实测可用）
+  - 支持 `deepseek-reasoner-search` R1联网（✅ 实测可用）
   - PoW 挑战自动解决
   - 流式/非流式响应
 
 - **通义千问渠道**
-  - 支持 qwen-turbo / qwen-plus / qwen-max / qwen-max-long
+  - 支持 `qwen-turbo` / `qwen-plus` / `qwen-max` / `qwen-max-long`
   - 深度思考/智能搜索按钮联动
   - 流式/非流式响应
+  - ⚠️ WebView2 初始化偶发失败，需用户确认登录状态
 
 - **豆包渠道**
-  - 支持 doubao-pro / doubao-lite / doubao-role
+  - 支持 `doubao-pro` / `doubao-lite` / `doubao-role`
   - 流式/非流式响应
+  - ⚠️ WebView2 初始化偶发失败，需用户确认登录状态
 
 - **核心功能**
   - OpenAI 兼容 API 格式

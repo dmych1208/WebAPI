@@ -750,8 +750,7 @@ namespace WebAPI.Controls
                 try
                 {
                     // 注入 prompt 并发送
-                    string injectResult = await _adapter!.InjectPromptAsync(WebView, prompt);
-                    Log($"注入结果: {injectResult}", LogLevel.Debug);
+                    await _adapter!.InjectPromptAsync(WebView, prompt);
 
                     // DeepSeek PoW 流程
                     if (needsPow)
@@ -896,18 +895,13 @@ namespace WebAPI.Controls
                 if (WebView.CoreWebView2 != null)
                 {
                     WebView.CoreWebView2.Stop();
-                    ShowLoadingSpinner();
-                    PlaceholderText.Text = "正在刷新页面...";
-                    WebView.CoreWebView2.Reload();
-                    Log("页面正在刷新", LogLevel.Info);
                 }
-                else
-                {
-                    ShowLoadingSpinner();
-                    PlaceholderText.Text = "正在重新初始化...";
-                    await InitializeWebView2Async();
-                    Log("浏览器内核已重启", LogLevel.Info);
-                }
+
+                ShowLoadingSpinner();
+                PlaceholderText.Text = "正在重新初始化...";
+
+                await InitializeWebView2Async();
+                Log("浏览器内核已重启", LogLevel.Info);
             }
             catch (Exception ex)
             {
