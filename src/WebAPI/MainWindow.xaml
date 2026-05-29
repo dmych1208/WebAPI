@@ -5,6 +5,7 @@
         xmlns:local="clr-namespace:WebAPI"
         Title="WebAPI - AI Relay" Height="720" Width="1200"
         MinHeight="500" MinWidth="900"
+        ResizeMode="CanResizeWithGrip"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgDark}"
         Foreground="{StaticResource TextPrimary}">
@@ -28,41 +29,49 @@
         <tb:TaskbarIcon x:Name="TrayIcon"
                         IconSource="logo.ico"
                         ToolTipText="WebAPI - AI Relay 代理服务"
-                        LeftClickCommand="{x:Static local:MainWindowCommands.SwitchTabCommand}"
+                        LeftClickCommand="{x:Static local:MainWindowCommands.ShowWindowCommand}"
                         ContextMenu="{StaticResource TrayMenu}"/>
 
-        <!-- 顶部：标签页栏 + 工具按钮 -->
-        <DockPanel DockPanel.Dock="Top" Margin="8,4,8,0">
-            <TabControl x:Name="ChannelTabs" 
+        <!-- 底部：状态栏（固定高度28px） -->
+        <Grid DockPanel.Dock="Bottom" Height="28" MaxHeight="28" MinHeight="28"
+              Background="{StaticResource BgPanel}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" x:Name="StatusText" Text="就绪"
+                       FontSize="12" Foreground="{StaticResource TextSecondary}"
+                       VerticalAlignment="Center" Margin="8,0,4,0"/>
+            <Separator Grid.Column="1"/>
+            <StackPanel Grid.Column="2" x:Name="ChannelStatusPanel" Orientation="Horizontal"
+                        VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="3" x:Name="StatusRequests" Text="请求: 0"
+                       FontSize="12" Foreground="{StaticResource TextSecondary}"
+                       VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0"/>
+            <TextBlock Grid.Column="4" x:Name="StatusUptime" Text=""
+                       FontSize="12" Foreground="{StaticResource TextSecondary}"
+                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+        </Grid>
+
+        <!-- 主内容区 -->
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <!-- TabControl 仅用于标签头 -->
+            <TabControl x:Name="ChannelTabs" Grid.Row="0"
                         BorderThickness="0" 
                         Background="Transparent"
+                        Margin="8,4,8,0"
+                        Padding="0"
                         SelectionChanged="ChannelTabs_SelectionChanged"/>
-        </DockPanel>
-
-        <!-- 底部：状态栏 -->
-        <StatusBar DockPanel.Dock="Bottom" 
-                    Background="{StaticResource BgPanel}" 
-                    BorderBrush="{StaticResource BorderGray}"
-                    Foreground="{StaticResource TextSecondary}"
-                    FontSize="12" Padding="4,2">
-            <StatusBarItem>
-                <TextBlock x:Name="StatusText" Text="就绪"/>
-            </StatusBarItem>
-            <Separator/>
-            <StatusBarItem>
-                <TextBlock x:Name="StatusPorts" Text=""/>
-            </StatusBarItem>
-            <Separator/>
-            <StatusBarItem>
-                <TextBlock x:Name="StatusRequests" Text="请求: 0"/>
-            </StatusBarItem>
-            <Separator/>
-            <StatusBarItem HorizontalAlignment="Right">
-                <TextBlock x:Name="StatusUptime" Text=""/>
-            </StatusBarItem>
-        </StatusBar>
-
-        <!-- 中间内容区：由标签页控制 -->
+            <!-- 内容区：所有面板始终在可视化树中 -->
+            <Grid x:Name="ContentGrid" Grid.Row="1" Margin="8,0,8,0"/>
+        </Grid>
     </DockPanel>
 
 </Window>

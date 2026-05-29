@@ -9,7 +9,7 @@ namespace WebAPI.Adapters
     {
         public string PlatformId => "doubao";
         public string PlatformName => "豆包";
-        public string TargetUrl => "https://www.doubao.com/";
+        public string TargetUrl => "https://www.doubao.com/chat/";
         public int DefaultPort => 55556;
         public string UserDataFolder => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2_Data", "Doubao");
 
@@ -25,68 +25,62 @@ namespace WebAPI.Adapters
             return @"
 (() => {
     const originalFetch = window.fetch;
-    const originalXhrOpen = XMLHttpRequest.prototype.open;
-    const originalXhrSend = XMLHttpRequest.prototype.send;
+
+    function isChatResponse(url) {
+        if (typeof url !== 'string') return false;
+        if (url.includes('volcengine') || url.includes('ark') || url.includes('doubao')) return true;
+        if (!url.includes('/api/') && !url.includes('/chat/') && !url.includes('completion') && !url.includes('stream')) return false;
+        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
+        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
+        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
+        return true;
+    }
 
     window.fetch = async function(...args) {
-        const url = args[0];
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
         try {
             const response = await originalFetch.apply(this, args);
-            
-            // 豆包使用 volcengine API，匹配更多特征
-            if (typeof url === 'string' && (
-                url.includes('/api/') || 
-                url.includes('/chat/') || 
-                url.includes('volcengine') ||
-                url.includes('doubao') ||
-                url.includes('completion') ||
-                url.includes('stream')
-            )) {
-                const cloned = response.clone();
-                const text = await cloned.text();
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: text
-                    }));
+
+            if (isChatResponse(url)) {
+                if (response.body) {
+                    const clone = response.clone();
+                    (async () => {
+                        try {
+                            const reader = clone.body.getReader();
+                            const decoder = new TextDecoder();
+                            while (true) {
+                                const result = await reader.read();
+                                if (result.done) {
+                                    if (window.chrome && window.chrome.webview) {
+                                        window.chrome.webview.postMessage(JSON.stringify({
+                                            type: 'NETWORK_DONE',
+                                            url: url
+                                        }));
+                                    }
+                                    break;
+                                }
+                                const chunk = decoder.decode(result.value, { stream: true });
+                                if (window.chrome && window.chrome.webview) {
+                                    window.chrome.webview.postMessage(JSON.stringify({
+                                        type: 'NETWORK_DATA',
+                                        url: url,
+                                        data: chunk
+                                    }));
+                                }
+                            }
+                        } catch (e) {
+                        }
+                    })();
                 }
             }
-            
+
             return response;
         } catch (err) {
             return originalFetch.apply(this, args);
         }
     };
 
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        this._url = url;
-        return originalXhrOpen.apply(this, [method, url, ...rest]);
-    };
-
-    XMLHttpRequest.prototype.send = function(...args) {
-        this.addEventListener('readystatechange', function() {
-            if (this.readyState === 4 && this._url && (
-                this._url.includes('/api/') || 
-                this._url.includes('/chat/') || 
-                this._url.includes('volcengine') ||
-                this._url.includes('doubao') ||
-                this._url.includes('completion') ||
-                this._url.includes('stream')
-            )) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: this._url,
-                        data: this.responseText
-                    }));
-                }
-            }
-        });
-        return originalXhrSend.apply(this, args);
-    };
-
-    console.log('[DoubaoAdapter] 网络拦截已启用');
+    console.log('[DoubaoAdapter] 网络拦截已启用(流式)');
 })();
 ";
         }
@@ -265,6 +259,117 @@ namespace WebAPI.Adapters
 
             var parser = new SseParser();
             return parser.Parse(rawLine);
+        }
+
+        public string GetModeSwitchScript(bool deepThink, bool search)
+        {
+            string srFlag = search ? "true" : "false";
+            return $@"
+(async () => {{
+    function sleep(ms) {{ return new Promise(r => setTimeout(r, ms)); }}
+
+    var searchToggles = document.querySelectorAll('button, [role=""switch""], div[class*=""search""], [data-testid]');
+    for (var j = 0; j < searchToggles.length; j++) {{
+        var toggle = searchToggles[j];
+        var txt = (toggle.textContent || '').toLowerCase();
+        var aLabel = (toggle.getAttribute('aria-label') || '').toLowerCase();
+        if (txt.includes('搜索') || txt.includes('联网') || txt.includes('search') ||
+            aLabel.includes('搜索') || aLabel.includes('search')) {{
+            var isActive = toggle.classList.contains('active') || 
+                          toggle.classList.contains('selected') ||
+                          toggle.classList.contains('checked') ||
+                          toggle.getAttribute('aria-checked') === 'true';
+            if ({srFlag} !== isActive) {{
+                toggle.click();
+                await sleep(300);
+            }}
+            break;
+        }}
+    }}
+}})();
+";
+        }
+
+        public string? ExtractContentFromSseData(string dataJson, string eventType)
+        {
+            if (string.IsNullOrEmpty(dataJson)) return null;
+
+            try
+            {
+                var data = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(dataJson);
+
+                if (data.TryGetProperty("event_type", out var etProp))
+                {
+                    int eventTypeCode = etProp.GetInt32();
+
+                    if (eventTypeCode == 2003 && data.TryGetProperty("event_data", out var edProp))
+                    {
+                        string? eventDataStr = edProp.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? edProp.GetString() : null;
+                        if (eventDataStr != null)
+                        {
+                            try
+                            {
+                                var eventData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(eventDataStr);
+                                if (eventData.TryGetProperty("text", out var tProp)) return tProp.GetString();
+                                if (eventData.TryGetProperty("content", out var cProp)) return cProp.GetString();
+                                if (eventData.TryGetProperty("delta", out var dProp)) return dProp.GetString();
+                            }
+                            catch { return eventDataStr; }
+                        }
+                        else if (edProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            if (edProp.TryGetProperty("text", out var tProp)) return tProp.GetString();
+                            if (edProp.TryGetProperty("content", out var cProp)) return cProp.GetString();
+                            if (edProp.TryGetProperty("delta", out var dProp)) return dProp.GetString();
+                        }
+                    }
+
+                    if (eventTypeCode == 2002) return null;
+
+                    if (data.TryGetProperty("event_data", out var edProp2))
+                    {
+                        string? edStr = edProp2.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? edProp2.GetString() : null;
+                        if (edStr != null)
+                        {
+                            try
+                            {
+                                var eventData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(edStr);
+                                if (eventData.TryGetProperty("text", out var tProp)) return tProp.GetString();
+                                if (eventData.TryGetProperty("content", out var cProp)) return cProp.GetString();
+                                if (eventData.TryGetProperty("message", out var mProp) && mProp.TryGetProperty("content", out var mcProp))
+                                    return mcProp.GetString();
+                            }
+                            catch { }
+                        }
+                        else if (edProp2.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            if (edProp2.TryGetProperty("text", out var tProp)) return tProp.GetString();
+                            if (edProp2.TryGetProperty("content", out var cProp)) return cProp.GetString();
+                        }
+                    }
+
+                    return null;
+                }
+
+                if (data.TryGetProperty("choices", out var choicesProp) && choicesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var firstChoice = choicesProp.EnumerateArray().FirstOrDefault();
+                    if (firstChoice.TryGetProperty("delta", out var deltaProp))
+                    {
+                        if (deltaProp.TryGetProperty("content", out var dcProp))
+                            return dcProp.GetString();
+                    }
+                }
+
+                if (data.TryGetProperty("text", out var textProp)) return textProp.GetString();
+                if (data.TryGetProperty("content", out var contentProp)) return contentProp.GetString();
+                if (data.TryGetProperty("delta", out var deltaProp2)) return deltaProp2.GetString();
+            }
+            catch { }
+
+            return null;
         }
 
         private string EscapeForJs(string str)

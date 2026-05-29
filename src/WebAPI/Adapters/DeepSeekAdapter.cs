@@ -59,54 +59,96 @@ namespace WebAPI.Adapters
         {
             return @"
 (() => {
+    console.log('[DeepSeekAdapter] 网络拦截脚本开始加载...');
     const originalFetch = window.fetch;
-    const originalXhrOpen = XMLHttpRequest.prototype.open;
-    const originalXhrSend = XMLHttpRequest.prototype.send;
+
+    function isChatResponse(url) {
+        if (typeof url !== 'string') return false;
+        if (!url.includes('/api/') && !url.includes('/chat/')) return false;
+        if (url.includes('rephrase') || url.includes('rewrite') || url.includes('search_query') || url.includes('query_rewrite')) return false;
+        if (url.includes('suggest') || url.includes('recommend') || url.includes('feedback') || url.includes('log')) return false;
+        if (url.includes('config') || url.includes('setting') || url.includes('abtest') || url.includes('feature')) return false;
+        return true;
+    }
+
+    function sendToBridge(type, url, data) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(JSON.stringify({ type: type, url: url, data: data }));
+        }
+    }
 
     window.fetch = async function(...args) {
-        const url = args[0];
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+        console.log('[DeepSeekAdapter] fetch:', url);
         try {
             const response = await originalFetch.apply(this, args);
 
-            if (typeof url === 'string' && (url.includes('/api/') || url.includes('/chat/'))) {
-                const cloned = response.clone();
-                const text = await cloned.text();
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: url,
-                        data: text
-                    }));
-                }
+            if (isChatResponse(url) && response.body) {
+                const clone = response.clone();
+                const reader = clone.body.getReader();
+                const decoder = new TextDecoder();
+                (async () => {
+                    try {
+                        console.log('[DeepSeekAdapter] 开始读取响应流...');
+                        while (true) {
+                            var result = await reader.read();
+                            if (result.done) {
+                                console.log('[DeepSeekAdapter] 响应流读取完成');
+                                sendToBridge('NETWORK_DONE', url, '');
+                                break;
+                            }
+                            var chunk = decoder.decode(result.value, { stream: true });
+                            sendToBridge('NETWORK_DATA', url, chunk);
+                        }
+                    } catch (e) {
+                        console.error('[DeepSeekAdapter] 读取流异常:', e);
+                    }
+                })();
             }
 
             return response;
         } catch (err) {
+            console.error('[DeepSeekAdapter] fetch异常:', err);
             return originalFetch.apply(this, args);
         }
     };
 
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        this._url = url;
-        return originalXhrOpen.apply(this, [method, url, ...rest]);
-    };
+    console.log('[DeepSeekAdapter] fetch拦截已设置');
 
-    XMLHttpRequest.prototype.send = function(...args) {
-        this.addEventListener('readystatechange', function() {
-            if (this.readyState === 4 && this._url && (this._url.includes('/api/') || this._url.includes('/chat/'))) {
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage(JSON.stringify({
-                        type: 'NETWORK_DATA',
-                        url: this._url,
-                        data: this.responseText
-                    }));
-                }
-            }
+    const OriginalEventSource = window.EventSource;
+    window.EventSource = function(url, config) {
+        console.log('[DeepSeekAdapter] 创建EventSource:', url);
+        const es = new OriginalEventSource(url, config);
+        const origAddEventListener = es.addEventListener;
+        es.addEventListener = function(type, listener, options) {
+            const wrappedListener = function(event) {
+                const msgData = 'event:' + type + '\ndata:' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)) + '\n\n';
+                sendToBridge('NETWORK_DATA', url, msgData);
+                if (listener) listener.call(this, event);
+            };
+            return origAddEventListener.call(this, type, wrappedListener, options);
+        };
+        let _onmessage = null, _onopen = null, _onerror = null;
+        Object.defineProperty(es, 'onmessage', {
+            get: function() { return _onmessage; },
+            set: function(fn) { _onmessage = fn; if (fn) es.addEventListener('message', fn); }
         });
-        return originalXhrSend.apply(this, args);
+        Object.defineProperty(es, 'onopen', {
+            get: function() { return _onopen; },
+            set: function(fn) { _onopen = fn; if (fn) es.addEventListener('open', fn); }
+        });
+        Object.defineProperty(es, 'onerror', {
+            get: function() { return _onerror; },
+            set: function(fn) { _onerror = fn; if (fn) es.addEventListener('error', fn); }
+        });
+        return es;
     };
+    Object.defineProperty(window.EventSource, 'prototype', { value: OriginalEventSource.prototype });
+    window.EventSource.CONNECTING = OriginalEventSource.CONNECTING;
+    window.EventSource.OPEN = OriginalEventSource.OPEN;
+    window.EventSource.CLOSED = OriginalEventSource.CLOSED;
 
-    console.log('[DeepSeekAdapter] 网络拦截已启用');
+    console.log('[DeepSeekAdapter] 网络拦截已完全启用');
 })();
 ";
         }
@@ -341,6 +383,166 @@ namespace WebAPI.Adapters
 
             var parser = new SseParser();
             return parser.Parse(rawLine);
+        }
+
+        public string GetModeSwitchScript(bool deepThink, bool search)
+        {
+            string dtFlag = deepThink ? "true" : "false";
+            string srFlag = search ? "true" : "false";
+            return $@"
+(async () => {{
+    function sleep(ms) {{ return new Promise(r => setTimeout(r, ms)); }}
+
+    var modelBtns = document.querySelectorAll('button, [role=""tab""], div[class*=""model""], div[class*=""tab""], [data-testid]');
+    var deepThinkBtn = null;
+    var chatBtn = null;
+    for (var i = 0; i < modelBtns.length; i++) {{
+        var btn = modelBtns[i];
+        var text = (btn.textContent || '').toLowerCase();
+        var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        if (text.includes('deepthink') || text.includes('r1') || text.includes('深度思考') ||
+            ariaLabel.includes('deepthink') || ariaLabel.includes('r1')) {{
+            deepThinkBtn = btn;
+        }}
+        if ((text.includes('chat') && !text.includes('search')) || 
+            (text === '对话') || (text.includes('标准') && !text.includes('深度'))) {{
+            chatBtn = btn;
+        }}
+    }}
+
+    if ({dtFlag} && deepThinkBtn) {{
+        var dtActive = deepThinkBtn.classList.contains('active') || 
+                      deepThinkBtn.classList.contains('selected') ||
+                      deepThinkBtn.getAttribute('aria-checked') === 'true' ||
+                      deepThinkBtn.getAttribute('aria-selected') === 'true';
+        if (!dtActive) {{
+            deepThinkBtn.click();
+            await sleep(500);
+        }}
+    }} else if (!{dtFlag} && chatBtn) {{
+        var chatActive = chatBtn.classList.contains('active') || 
+                        chatBtn.classList.contains('selected') ||
+                        chatBtn.getAttribute('aria-checked') === 'true' ||
+                        chatBtn.getAttribute('aria-selected') === 'true';
+        if (!chatActive) {{
+            chatBtn.click();
+            await sleep(500);
+        }}
+    }} else if (!{dtFlag} && deepThinkBtn) {{
+        var dtActive2 = deepThinkBtn.classList.contains('active') || 
+                       deepThinkBtn.classList.contains('selected') ||
+                       deepThinkBtn.getAttribute('aria-checked') === 'true' ||
+                       deepThinkBtn.getAttribute('aria-selected') === 'true';
+        if (dtActive2) {{
+            deepThinkBtn.click();
+            await sleep(500);
+        }}
+    }}
+
+    var searchToggles = document.querySelectorAll('button, [role=""switch""], div[class*=""search""], [data-testid]');
+    for (var j = 0; j < searchToggles.length; j++) {{
+        var toggle = searchToggles[j];
+        var txt = (toggle.textContent || '').toLowerCase();
+        var aLabel = (toggle.getAttribute('aria-label') || '').toLowerCase();
+        if (txt.includes('search') || txt.includes('搜索') || txt.includes('联网') ||
+            aLabel.includes('search') || aLabel.includes('搜索')) {{
+            var isActive = toggle.classList.contains('active') || 
+                          toggle.classList.contains('selected') ||
+                          toggle.classList.contains('checked') ||
+                          toggle.getAttribute('aria-checked') === 'true';
+            if ({srFlag} !== isActive) {{
+                toggle.click();
+                await sleep(300);
+            }}
+            break;
+        }}
+    }}
+}})();
+";
+        }
+
+        public string? ExtractContentFromSseData(string dataJson, string eventType)
+        {
+            if (string.IsNullOrEmpty(dataJson)) return null;
+            if (dataJson == "FINISHED") return null;
+
+            try
+            {
+                var data = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(dataJson);
+
+                if (data.TryGetProperty("p", out var pProp) && data.TryGetProperty("v", out var vProp))
+                {
+                    string p = pProp.GetString() ?? "";
+                    string? v = vProp.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? vProp.GetString() : null;
+
+                    if (p.Contains("reasoning") || p.Contains("thinking"))
+                        return v;
+
+                    if (p.Contains("status") || p.Contains("accumulated_token_usage"))
+                        return null;
+
+                    if (p.Contains("content") || p.Contains("choices") || string.IsNullOrEmpty(p))
+                        return v;
+                }
+
+                if (data.TryGetProperty("type", out var typeProp))
+                {
+                    string type = typeProp.GetString() ?? "";
+                    if (type == "thinking")
+                    {
+                        if (data.TryGetProperty("content", out var cProp))
+                            return cProp.GetString();
+                        if (data.TryGetProperty("v", out var vProp2) && vProp2.ValueKind == System.Text.Json.JsonValueKind.String)
+                            return vProp2.GetString();
+                        return null;
+                    }
+                    if (type == "text")
+                    {
+                        if (data.TryGetProperty("content", out var cProp))
+                            return cProp.GetString();
+                        if (data.TryGetProperty("v", out var vProp2) && vProp2.ValueKind == System.Text.Json.JsonValueKind.String)
+                            return vProp2.GetString();
+                        return null;
+                    }
+                    if (type == "search_result" || type == "search")
+                        return null;
+                }
+
+                if (data.TryGetProperty("choices", out var choicesProp) && choicesProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var firstChoice = choicesProp.EnumerateArray().FirstOrDefault();
+                    if (firstChoice.TryGetProperty("delta", out var deltaProp))
+                    {
+                        if (deltaProp.TryGetProperty("content", out var dcProp))
+                            return dcProp.GetString();
+                        if (deltaProp.TryGetProperty("reasoning_content", out var rcProp))
+                            return rcProp.GetString();
+                    }
+                }
+
+                var fragments = data.TryGetProperty("v", out var vFrag) && vFrag.ValueKind == System.Text.Json.JsonValueKind.Object
+                    ? vFrag.TryGetProperty("response", out var respProp) && respProp.ValueKind == System.Text.Json.JsonValueKind.Object
+                        ? respProp.TryGetProperty("fragments", out var fragProp) ? fragProp : default
+                        : default
+                    : default;
+
+                if (fragments.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    foreach (var frag in fragments.EnumerateArray())
+                    {
+                        string? fragType = frag.TryGetProperty("type", out var ftProp) ? ftProp.GetString() : null;
+                        if (fragType == "THINKING" || fragType == "reasoning") continue;
+                        if (frag.TryGetProperty("content", out var fcProp))
+                            sb.Append(fcProp.GetString() ?? "");
+                    }
+                    return sb.Length > 0 ? sb.ToString() : null;
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         private string EscapeForJs(string str)

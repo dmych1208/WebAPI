@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -11,9 +12,6 @@ using WebAPI.Common;
 using WebAPI.Models;
 using WebAPI.Controls;
 using Path = System.IO.Path;
-using NotifyIcon = System.Windows.Forms.NotifyIcon;
-using ContextMenuStrip = System.Windows.Forms.ContextMenuStrip;
-using ToolStripMenuItem = System.Windows.Forms.ToolStripMenuItem;
 
 namespace WebAPI
 {
@@ -22,14 +20,19 @@ namespace WebAPI
         public static RoutedCommand SendMessageCommand { get; } = new RoutedCommand();
         public static RoutedCommand SwitchTabCommand { get; } = new RoutedCommand();
         public static RoutedCommand RestartBrowserCommand { get; } = new RoutedCommand();
+        public static RoutedCommand ShowWindowCommand { get; } = new RoutedCommand();
     }
 
     public partial class MainWindow : System.Windows.Window
     {
         private List<ChannelConfig> _channels = new();
         private Dictionary<string, ChannelPanel> _channelPanels = new();
+        private Dictionary<string, bool> _channelHealthCache = new();
+        private string? _selectedChannelId;
         private int _totalRequests = 0;
         private DateTime _startTime;
+        private int _initIndex = 0;
+        private static readonly HttpClient _healthClient = new() { Timeout = TimeSpan.FromSeconds(3) };
 
         public MainWindow()
         {
@@ -50,11 +53,14 @@ namespace WebAPI
 
             var cb3 = new CommandBinding(MainWindowCommands.RestartBrowserCommand, RestartBrowser_Executed);
             this.CommandBindings.Add(cb3);
+
+            var cb4 = new CommandBinding(MainWindowCommands.ShowWindowCommand, ShowWindow_Executed);
+            this.CommandBindings.Add(cb4);
         }
 
         private async void SendMessage_Executed(object sender, ExecutedRoutedEventArgs e)
         {
-            if (ChannelTabs.SelectedItem is TabItem tab && tab.Content is ChannelPanel panel)
+            if (_selectedChannelId != null && _channelPanels.TryGetValue(_selectedChannelId, out var panel))
             {
                 await panel.TriggerSendAsync();
             }
@@ -71,15 +77,27 @@ namespace WebAPI
 
         private async void RestartBrowser_Executed(object sender, ExecutedRoutedEventArgs e)
         {
-            if (ChannelTabs.SelectedItem is TabItem tab && tab.Content is ChannelPanel panel)
+            if (_selectedChannelId != null && _channelPanels.TryGetValue(_selectedChannelId, out var panel))
             {
                 await panel.TriggerRestartBrowserAsync();
             }
         }
 
+        private void ShowWindow_Executed(object sender, ExecutedRoutedEventArgs e)
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+            Focus();
+        }
+
         protected override void OnStateChanged(EventArgs e)
         {
             base.OnStateChanged(e);
+            if (WindowState == WindowState.Minimized)
+            {
+                Hide();
+            }
         }
         
         private void SetApplicationIcon()
@@ -186,18 +204,16 @@ namespace WebAPI
             Show();
             WindowState = WindowState.Normal;
             Activate();
+            Focus();
         }
 
         private void Tray_Exit_Click(object sender, RoutedEventArgs e)
         {
             ConfigManager.ConfigReloaded -= OnConfigReloaded;
             TrayIcon.Dispose();
-            foreach (TabItem tab in ChannelTabs.Items)
+            foreach (var panel in _channelPanels.Values)
             {
-                if (tab.Content is ChannelPanel panel)
-                {
-                    try { panel.StopChannel(); } catch { }
-                }
+                try { panel.StopChannel(); } catch { }
             }
             SaveWindowState();
             Environment.Exit(0);
@@ -282,6 +298,10 @@ namespace WebAPI
             if (tabToRemove != null)
             {
                 ChannelTabs.Items.Remove(tabToRemove);
+            }
+            if (_channelPanels.TryGetValue(channelId, out var panel))
+            {
+                ContentGrid.Children.Remove(panel);
                 _channelPanels.Remove(channelId);
             }
         }
@@ -302,7 +322,8 @@ namespace WebAPI
                 Header = CreateTabHeader(config),
                 Tag = config.Id,
                 Background = System.Windows.Application.Current.FindResource("BgPanel") as System.Windows.Media.Brush,
-                BorderThickness = new Thickness(0)
+                BorderThickness = new Thickness(0),
+                Content = new Grid { Height = 0 }
             };
 
             var panel = new ChannelPanel(config);
@@ -315,11 +336,36 @@ namespace WebAPI
                     StatusRequests.Text = $"请求: {_totalRequests}";
                 });
             };
+            panel.OnProxySettingsChanged += () =>
+            {
+                ConfigManager.SaveChannels(_channels);
+            };
 
-            tabItem.Content = panel;
             ChannelTabs.Items.Add(tabItem);
+            ContentGrid.Children.Add(panel);
+
+            panel.Visibility = ContentGrid.Children.Count == 1
+                ? Visibility.Visible
+                : Visibility.Hidden;
 
             _channelPanels[config.Id] = panel;
+
+            var delay = _initIndex * 3000;
+            _initIndex++;
+            var panelRef = panel;
+            
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(delay);
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    if (!panelRef.IsInitialized)
+                    {
+                        panelRef.MarkInitialized();
+                        await panelRef.InitializeAsync();
+                    }
+                });
+            });
         }
 
         private void CreateDevChannelTab()
@@ -375,28 +421,110 @@ namespace WebAPI
         {
             if (ChannelTabs.SelectedItem is TabItem tab && tab.Tag is string channelId)
             {
+                _selectedChannelId = channelId;
+
+                foreach (var kv in _channelPanels)
+                {
+                    kv.Value.Visibility = kv.Key == channelId
+                        ? Visibility.Visible
+                        : Visibility.Hidden;
+                }
+
                 UpdateStatusBar();
             }
         }
 
         private void UpdateStatusBar()
         {
-            if (ChannelTabs.SelectedItem is TabItem tab && tab.Content is ChannelPanel panel)
+            if (_selectedChannelId != null && _channelPanels.TryGetValue(_selectedChannelId, out var panel))
             {
                 StatusText.Text = panel.StatusText;
-                StatusPorts.Text = $"端口: {panel.Port}";
+            }
+            UpdateAllChannelsStatus();
+        }
+
+        private void UpdateAllChannelsStatus()
+        {
+            ChannelStatusPanel.Children.Clear();
+
+            foreach (var kv in _channelPanels)
+            {
+                var panel = kv.Value;
+                var channelId = kv.Key;
+                bool pageHealthy = panel.PageUsable;
+                bool httpHealthy = panel.IsRunning &&
+                    (_channelHealthCache.TryGetValue(channelId, out var h) && h);
+                bool isHealthy;
+                
+                // 如果已经初始化，则必须同时满足页面健康和HTTP健康
+                if (panel.IsInitialized)
+                    isHealthy = httpHealthy && pageHealthy;
+                else
+                    isHealthy = httpHealthy; // 未初始化时，只要HTTP健康就显示绿灯
+
+                var dot = new Ellipse
+                {
+                    Width = 8,
+                    Height = 8,
+                    Margin = new Thickness(6, 0, 3, 0),
+                    Fill = isHealthy
+                        ? new SolidColorBrush(Color.FromRgb(0x4C, 0xC7, 0x4C))
+                        : new SolidColorBrush(Color.FromRgb(0xE0, 0x4C, 0x4C)),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                var name = new TextBlock
+                {
+                    Text = panel.ChannelName,
+                    FontSize = 11,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = (Brush)FindResource("TextSecondary")
+                };
+
+                ChannelStatusPanel.Children.Add(dot);
+                ChannelStatusPanel.Children.Add(name);
+            }
+        }
+
+        private async Task CheckChannelsHealthAsync()
+        {
+            foreach (var kv in _channelPanels)
+            {
+                var panel = kv.Value;
+                var channelId = kv.Key;
+                try
+                {
+                    var url = $"http://127.0.0.1:{panel.Port}/health";
+                    var response = await _healthClient.GetAsync(url);
+                    _channelHealthCache[channelId] = response.IsSuccessStatusCode;
+                }
+                catch
+                {
+                    _channelHealthCache[channelId] = false;
+                }
             }
         }
 
         private void StartUptimeTimer()
         {
+            int tickCount = 0;
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-            timer.Tick += (s, e) =>
+            timer.Tick += async (s, e) =>
             {
+                tickCount++;
                 var elapsed = DateTime.Now - _startTime;
                 StatusUptime.Text = $"运行: {(int)elapsed.TotalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
+                UpdateAllChannelsStatus();
+
+                if (tickCount % 10 == 0)
+                {
+                    await CheckChannelsHealthAsync();
+                    UpdateAllChannelsStatus();
+                }
             };
             timer.Start();
+
+            _ = CheckChannelsHealthAsync();
         }
     }
 }

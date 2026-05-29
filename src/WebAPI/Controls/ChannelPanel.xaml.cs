@@ -19,6 +19,9 @@ namespace WebAPI.Controls
         private IAdapter? _adapter;
         private bool _isRunning = true;
         private bool _isInitialized = false;
+        public new bool IsInitialized => _isInitialized;
+
+        public void MarkInitialized() => _isInitialized = true;
 
         // 响应收集（非流式 fallback 用）
         private TaskCompletionSource<string>? _responseTcs;
@@ -29,6 +32,23 @@ namespace WebAPI.Controls
         private SemaphoreSlim _streamSignal = new(0);
         private bool _isStreaming = false;
 
+        private bool _deepThinkEnabled = false;
+        private bool _searchEnabled = false;
+
+        private bool _controllerAvailable = false;
+        private readonly List<string> _citations = new();
+        private TaskCompletionSource<bool>? _pageLoadTcs;
+        private bool _pageUsable = false;
+        public bool PageUsable => _pageUsable;
+        private static readonly string AntiDetectionScript = @"
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+delete navigator.__proto__.webdriver;
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+window.dispatchEvent(new Event('load'));
+window.dispatchEvent(new Event('DOMContentLoaded'));
+";
+
         // 请求处理锁
         private readonly SemaphoreSlim _requestLock = new(1, 1);
         private CancellationTokenSource? _requestCts;
@@ -37,10 +57,13 @@ namespace WebAPI.Controls
         private TaskCompletionSource<DeepSeekPowChallenge>? _powChallengeTcs;
 
         public Action<string, LogLevel>? OnLogMessage;
+        public Action? OnProxySettingsChanged;
         public Action? OnRequestReceived;
 
         public string StatusText => _isRunning ? $"{_config.Name} 服务就绪" : $"{_config.Name} 已停止";
         public int Port => _config.Port;
+        public bool IsRunning => _isRunning;
+        public string ChannelName => _config.Name;
 
         public ChannelPanel(ChannelConfig config)
         {
@@ -58,26 +81,31 @@ namespace WebAPI.Controls
             TxtApiKey.Text = "sk-any";
 
             ModelList.ItemsSource = _config.Models;
+
+            if (_config.Id is "gemini" or "grok")
+                ProxyPanel.Visibility = Visibility.Visible;
         }
 
-        private async void ChannelPanel_Loaded(object sender, RoutedEventArgs e)
+        private void ChannelPanel_Loaded(object sender, RoutedEventArgs e)
         {
-            if (_isInitialized) return;
-            _isInitialized = true;
-            await InitializeAsync();
+            // Loaded 事件不再自动初始化，由 MainWindow 串行初始化控制
         }
 
-        private async Task InitializeAsync()
+        public async Task InitializeAsync()
         {
             try
             {
+                _streamChunks = new ConcurrentQueue<(string text, bool isDone)>();
+                _streamSignal = new SemaphoreSlim(0);
+                _isStreaming = false;
+                _responseBuffer.Clear();
+
                 Log("正在初始化 HTTP 服务...", LogLevel.Info);
 
                 _httpServer = new ChannelHttpServer(_config);
                 _httpServer.OnLog += (msg) => Log(msg, LogLevel.Info);
                 _httpServer.OnRequest += () => OnRequestReceived?.Invoke();
 
-                // 注册两种处理函数
                 _httpServer.ProcessPromptFunc = SendPromptAsync;
                 _httpServer.ProcessPromptStreamFunc = SendPromptStreamAsync;
 
@@ -87,21 +115,53 @@ namespace WebAPI.Controls
 
                 _adapter = CreateAdapter();
 
+                _pageLoadTcs = new TaskCompletionSource<bool>();
+
                 await InitializeWebView2Async();
 
-                PanelStatus.Text = "✅ 正在运行 (V2)";
-                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
+                bool pageOk = false;
+                try
+                {
+                    pageOk = await _pageLoadTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                }
+                catch (TimeoutException)
+                {
+                    Log("页面加载超时（15秒）", LogLevel.Warn);
+                }
+
+                if (pageOk)
+                {
+                    PanelStatus.Text = "✅ 正在运行 (V2)";
+                    PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
+                    Log("初始化完成（流式响应已启用）", LogLevel.Info);
+                }
+                else
+                {
+                    PanelStatus.Text = "⚠️ 页面加载失败";
+                    PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentRed");
+                    Log("页面加载失败，渠道已启动但网页不可用", LogLevel.Warn);
+                }
                 _isRunning = true;
 
-                Log("初始化完成（流式响应已启用）", LogLevel.Info);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(5000);
+                    await Dispatcher.InvokeAsync(async () =>
+                    {
+                        if (WebView.CoreWebView2 != null)
+                        {
+                            Log("自动刷新页面...", LogLevel.Info);
+                            WebView.CoreWebView2.Reload();
+                        }
+                    });
+                });
             }
             catch (Exception ex)
             {
                 Log($"初始化失败: {ex.Message}", LogLevel.Error);
-                _isRunning = true;
-                PanelStatus.Text = "⚠️ 服务已启动";
-                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
-                Log("服务已启动，可正常使用", LogLevel.Info);
+                _isRunning = false;
+                PanelStatus.Text = "❌ 初始化失败";
+                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentRed");
             }
         }
 
@@ -112,6 +172,10 @@ namespace WebAPI.Controls
                 "deepseek" => new DeepSeekAdapter(),
                 "qwen" => new QwenAdapter(),
                 "doubao" => new DoubaoAdapter(),
+                "gemini" => new GeminiAdapter(),
+                "grok" => new GrokAdapter(),
+                "yuanbao" => new YuanbaoAdapter(),
+                "kimi" => new KimiAdapter(),
                 _ => new DeepSeekAdapter()
             };
         }
@@ -126,8 +190,45 @@ namespace WebAPI.Controls
 
             try
             {
-                var env = await CoreWebView2Environment.CreateAsync(userDataFolder: _adapter.UserDataFolder);
-                await WebView.EnsureCoreWebView2Async(env);
+                if (WebView.CoreWebView2 != null)
+                {
+                    _controllerAvailable = true;
+                    WebView.CoreWebView2.Settings.UserAgent =
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.78 Safari/537.36";
+                    await WebView.CoreWebView2.ExecuteScriptAsync(AntiDetectionScript);
+                    WebView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
+                    WebView.NavigationCompleted += WebView_NavigationCompleted;
+                    try
+                    {
+                        await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(_adapter.GetNetworkInterceptorScript());
+                    }
+                    catch { }
+                    Log($"正在导航到 {_adapter.TargetUrl}...", LogLevel.Info);
+                    WebView.CoreWebView2.Navigate(_adapter.TargetUrl);
+                    WebView.Visibility = Visibility.Visible;
+                    HideLoadingSpinner();
+                    return;
+                }
+
+                var initCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                
+                var opts = new CoreWebView2EnvironmentOptions();
+                string? proxyArgs = GetProxyArgs();
+                if (proxyArgs != null)
+                {
+                    opts.AdditionalBrowserArguments = proxyArgs;
+                    Log($"代理已启用: {proxyArgs}", LogLevel.Info);
+                }
+                var envTask = CoreWebView2Environment.CreateAsync(userDataFolder: _adapter.UserDataFolder, options: opts);
+                var env = await envTask.WaitAsync(initCts.Token);
+                
+                var ensureTask = WebView.EnsureCoreWebView2Async(env);
+                await ensureTask.WaitAsync(initCts.Token);
+
+                _controllerAvailable = true;
+                WebView.CoreWebView2.Settings.UserAgent =
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.78 Safari/537.36";
+                await WebView.CoreWebView2.ExecuteScriptAsync(AntiDetectionScript);
 
                 await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(_adapter.GetNetworkInterceptorScript());
 
@@ -138,6 +239,18 @@ namespace WebAPI.Controls
                 WebView.Source = new Uri(_adapter.TargetUrl);
                 WebView.Visibility = Visibility.Visible;
                 HideLoadingSpinner();
+            }
+            catch (TimeoutException)
+            {
+                HideLoadingSpinner();
+                Log("WebView2 初始化超时（30秒）", LogLevel.Error);
+                PlaceholderText.Text = "❌ WebView2 初始化超时\n\n请检查系统资源或重启应用";
+            }
+            catch (OperationCanceledException)
+            {
+                HideLoadingSpinner();
+                Log("WebView2 初始化超时（30秒）", LogLevel.Error);
+                PlaceholderText.Text = "❌ WebView2 初始化超时\n\n请检查系统资源或重启应用";
             }
             catch (WebView2RuntimeNotFoundException)
             {
@@ -154,12 +267,49 @@ namespace WebAPI.Controls
             }
         }
 
-        private void WebView_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+        private async void WebView_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
         {
-            if (e.IsSuccess)
-                Log("页面加载完成", LogLevel.Info);
+            HideLoadingSpinner();
+
+            bool pageUsable = e.IsSuccess;
+
+            if (e.IsSuccess && WebView.CoreWebView2 != null)
+            {
+                try
+                {
+                    string checkResult = await WebView.CoreWebView2.ExecuteScriptAsync(
+                        "(function(){var t=document.title||'';" +
+                        "if(t.includes('ERR_')||t.includes('无法访问')||t.includes('connect')||" +
+                        "t.includes('Problem')||t.includes('proxy')||t.includes('timeout')||" +
+                        "t.includes('没有')||t.includes('No internet')||t==='')return'error';return'ok';})()");
+                    checkResult = checkResult.Trim('"');
+
+                    if (checkResult == "error")
+                    {
+                        pageUsable = false;
+                        Log($"页面错误: title='{WebView.CoreWebView2.DocumentTitle}'", LogLevel.Warn);
+                    }
+                }
+                catch { }
+
+                if (pageUsable)
+                {
+                    Log("页面加载完成", LogLevel.Info);
+                    try { await WebView.CoreWebView2.ExecuteScriptAsync(AntiDetectionScript); } catch { }
+                    try { await WebView.CoreWebView2.ExecuteScriptAsync(_adapter!.GetDomControlScript("")); } catch { }
+                }
+            }
             else
+            {
                 Log($"页面加载失败: {e.WebErrorStatus}", LogLevel.Error);
+            }
+
+            if (_pageLoadTcs != null && !_pageLoadTcs.Task.IsCompleted)
+            {
+                _pageLoadTcs.TrySetResult(pageUsable);
+            }
+
+            _pageUsable = pageUsable;
         }
 
         private void CoreWebView2_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -168,28 +318,26 @@ namespace WebAPI.Controls
             {
                 string message = e.TryGetWebMessageAsString();
 
-                if (message.Length > 200)
-                    Log($"收到 WebMessage: {message.Substring(0, 200)}...", LogLevel.Debug);
+                if (message.Length > 300)
+                    Log($"收到 WebMessage: {message.Substring(0, 300)}...", LogLevel.Debug);
                 else
                     Log($"收到 WebMessage: {message}", LogLevel.Debug);
 
-                // === DeepSeek PoW 挑战捕获 ===
-                if (_powChallengeTcs != null && !_powChallengeTcs.Task.IsCompleted
-                    && message.Contains("create_pow_challenge"))
-                {
-                    var adapter = _adapter as DeepSeekAdapter;
-                    adapter?.CapturePowChallenge(message);
-                    if (adapter?.CapturedPowChallenge != null)
-                    {
-                        Log($"PoW 挑战已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
-                        _powChallengeTcs.TrySetResult(adapter.CapturedPowChallenge);
-                    }
-                }
-
-                // === 流式响应：从网络拦截消息中提取内容 ===
-                if (_isStreaming && message.Contains("NETWORK_DATA"))
+                // === 网络拦截数据（流式和非流式都处理）===
+                // 优先处理 NETWORK_DATA，因为 PoW 也可能在其中
+                if (message.Contains("NETWORK_DATA"))
                 {
                     ProcessNetworkData(message);
+                    return;
+                }
+
+                // === NETWORK_DONE：非流式时结束响应 ===
+                if (message.Contains("NETWORK_DONE"))
+                {
+                    if (!_isStreaming && _responseTcs != null && _responseBuffer.Length > 0)
+                    {
+                        _responseTcs.TrySetResult(_responseBuffer.ToString());
+                    }
                     return;
                 }
 
@@ -230,25 +378,81 @@ namespace WebAPI.Controls
         {
             try
             {
-                // 解析 WebMessage JSON
                 var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(message);
                 if (!json.TryGetProperty("data", out var dataProp)) return;
 
                 string dataStr = dataProp.GetString() ?? "";
                 if (string.IsNullOrEmpty(dataStr)) return;
 
-                // 检查是否是 SSE 流
+                Log($"[网络拦截] 收到数据: {(dataStr.Length > 200 ? dataStr.Substring(0, 200) + "..." : dataStr)}", LogLevel.Debug);
+
+                // === DeepSeek PoW 挑战捕获 ===
+                if (_powChallengeTcs != null && !_powChallengeTcs.Task.IsCompleted &&
+                    dataStr.Contains("create_pow_challenge"))
+                {
+                    var adapter = _adapter as DeepSeekAdapter;
+                    if (adapter != null)
+                    {
+                        try
+                        {
+                            adapter.CapturePowChallenge(dataStr);
+
+                            if (adapter.CapturedPowChallenge != null)
+                            {
+                                Log($"PoW 挑战已捕获: difficulty={adapter.CapturedPowChallenge.difficulty}", LogLevel.Info);
+                                _powChallengeTcs.TrySetResult(adapter.CapturedPowChallenge);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"解析 PoW 挑战失败: {ex.Message}", LogLevel.Error);
+                        }
+                    }
+                }
+
+                if (dataStr.Contains("AI question rephraser") ||
+                    dataStr.Contains("rephrase the follow-up") ||
+                    dataStr.Contains("query_rewrite") ||
+                    dataStr.Contains("search_query"))
+                {
+                    Log("过滤非聊天响应(搜索重写器)", LogLevel.Debug);
+                    return;
+                }
+
+                CaptureCitations(dataStr);
+
                 if (dataStr.Contains("data:") || dataStr.Contains("event:"))
                 {
                     ProcessSseData(dataStr);
                 }
                 else
                 {
-                    // 非SSE格式，尝试直接解析JSON
-                    var content = SseParser.ExtractContent(dataStr);
+                    string? content = null;
+
+                    if (_adapter != null)
+                    {
+                        content = _adapter.ExtractContentFromSseData(dataStr, "");
+                    }
+
+                    if (content == null)
+                        content = SseParser.ExtractContent(dataStr);
+
                     if (!string.IsNullOrEmpty(content))
                     {
-                        EnqueueChunk(content, false);
+                        if (content.Contains("AI question rephraser") ||
+                            content.Contains("rephrase the follow-up"))
+                        {
+                            Log("过滤非聊天内容(搜索重写器)", LogLevel.Debug);
+                            return;
+                        }
+
+                        if (_isStreaming)
+                            EnqueueChunk(content, false);
+                        else
+                        {
+                            _responseBuffer.Append(content);
+                            Log($"累计收到内容: {_responseBuffer.Length} 字符", LogLevel.Debug);
+                        }
                     }
                 }
             }
@@ -258,6 +462,47 @@ namespace WebAPI.Controls
             }
         }
 
+        private void CaptureCitations(string dataStr)
+        {
+            try
+            {
+                if (!dataStr.Contains("\"url\"") && !dataStr.Contains("\"title\"")) return;
+
+                var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(dataStr);
+
+                void ExtractFromElement(System.Text.Json.JsonElement el, string prefix)
+                {
+                    if (el.TryGetProperty("search_results", out var sr) && sr.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        foreach (var item in sr.EnumerateArray())
+                        {
+                            string? title = null;
+                            string? url = null;
+                            if (item.TryGetProperty("title", out var tp)) title = tp.GetString();
+                            if (item.TryGetProperty("url", out var up)) url = up.GetString();
+                            if (!string.IsNullOrEmpty(title) || !string.IsNullOrEmpty(url))
+                            {
+                                var entry = $"[{title ?? url}] {(url ?? "")}";
+                                if (!_citations.Contains(entry))
+                                {
+                                    _citations.Add(entry);
+                                    Log($"捕获引用: {entry.Substring(0, Math.Min(80, entry.Length))}", LogLevel.Debug);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ExtractFromElement(json, "");
+
+                if (json.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    ExtractFromElement(dataProp, "");
+                if (json.TryGetProperty("event_data", out var edProp) && edProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    ExtractFromElement(edProp, "");
+            }
+            catch { }
+        }
+
         /// <summary>
         /// 解析 SSE 格式数据流
         /// </summary>
@@ -265,18 +510,22 @@ namespace WebAPI.Controls
         {
             using var reader = new StringReader(sseText);
             string? line;
+            string currentEventType = "";
 
             while ((line = reader.ReadLine()) != null)
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    currentEventType = "";
+                    continue;
+                }
 
                 line = line.Trim();
 
                 if (line.StartsWith("event:"))
                 {
-                    var eventType = line.Substring(6).Trim();
-                    if (eventType is "title" or "update_session" or "search_result" or "ping")
-                        continue; // 跳过内部事件
+                    currentEventType = line.Substring(6).Trim();
+                    continue;
                 }
                 else if (line.StartsWith("data:"))
                 {
@@ -284,23 +533,43 @@ namespace WebAPI.Controls
 
                     if (data == "[DONE]")
                     {
-                        EnqueueChunk("", true);
+                        if (_isStreaming)
+                            EnqueueChunk("", true);
+                        else if (_responseTcs != null && _responseBuffer.Length > 0)
+                            _responseTcs.TrySetResult(_responseBuffer.ToString());
                         return;
                     }
 
-                    if (SseParser.IsInternalMessage(data, "")) continue;
+                    if (SseParser.IsInternalMessage(data, currentEventType)) continue;
 
-                    var content = SseParser.ExtractContent(data);
+                    string? content = null;
+
+                    if (_adapter != null)
+                    {
+                        content = _adapter.ExtractContentFromSseData(data, currentEventType);
+                    }
+
+                    if (content == null)
+                        content = SseParser.ExtractContent(data);
+
                     if (!string.IsNullOrEmpty(content))
                     {
-                        EnqueueChunk(content, false);
+                        if (_isStreaming)
+                            EnqueueChunk(content, false);
+                        else
+                        {
+                            _responseBuffer.Append(content);
+                            Log($"累计收到内容: {_responseBuffer.Length} 字符", LogLevel.Debug);
+                        }
                     }
                     else
                     {
-                        // 检查是否包含 finish_reason
                         if (data.Contains("\"finish_reason\"") && data.Contains("\"stop\""))
                         {
-                            EnqueueChunk("", true);
+                            if (_isStreaming)
+                                EnqueueChunk("", true);
+                            else if (_responseTcs != null && _responseBuffer.Length > 0)
+                                _responseTcs.TrySetResult(_responseBuffer.ToString());
                             return;
                         }
                     }
@@ -390,12 +659,12 @@ namespace WebAPI.Controls
         /// <summary>
         /// 非流式发送 prompt，等待完整响应
         /// </summary>
-        public async Task<string> SendPromptAsync(string prompt)
+        public async Task<string> SendPromptAsync(string modelId, string prompt)
         {
-            return await await Dispatcher.InvokeAsync(() => SendPromptCoreAsync(prompt));
+            return await await Dispatcher.InvokeAsync(() => SendPromptCoreAsync(modelId, prompt));
         }
 
-        private async Task<string> SendPromptCoreAsync(string prompt)
+        private async Task<string> SendPromptCoreAsync(string modelId, string prompt)
         {
             if (_adapter == null || WebView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 未就绪");
@@ -413,6 +682,7 @@ namespace WebAPI.Controls
             {
                 Log($"发送 Prompt: {prompt.Substring(0, Math.Min(100, prompt.Length))}...", LogLevel.Info);
 
+                await SwitchModeBeforePromptAsync(modelId);
                 await InjectAndSendPromptAsync(prompt);
 
                 // 等待完整响应（最多 90 秒）
@@ -451,12 +721,12 @@ namespace WebAPI.Controls
         /// <summary>
         /// 流式发送 prompt，通过 streamCallback 实时回调每个 chunk
         /// </summary>
-        public async Task<string> SendPromptStreamAsync(string prompt, Action<string, bool> streamCallback)
+        public async Task<string> SendPromptStreamAsync(string modelId, string prompt, Action<string, bool> streamCallback)
         {
-            return await await Dispatcher.InvokeAsync(() => SendPromptStreamCoreAsync(prompt, streamCallback));
+            return await await Dispatcher.InvokeAsync(() => SendPromptStreamCoreAsync(modelId, prompt, streamCallback));
         }
 
-        private async Task<string> SendPromptStreamCoreAsync(string prompt, Action<string, bool> streamCallback)
+        private async Task<string> SendPromptStreamCoreAsync(string modelId, string prompt, Action<string, bool> streamCallback)
         {
             if (_adapter == null || WebView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 未就绪");
@@ -475,6 +745,8 @@ namespace WebAPI.Controls
             try
             {
                 Log($"[流式] 发送 Prompt: {prompt.Substring(0, Math.Min(100, prompt.Length))}...", LogLevel.Info);
+
+                await SwitchModeBeforePromptAsync(modelId);
 
                 // 注入 prompt 并发送
                 await InjectAndSendPromptAsync(prompt);
@@ -555,6 +827,81 @@ namespace WebAPI.Controls
             DeepSeekAdapter? dsAdapter = _adapter as DeepSeekAdapter;
             bool needsPow = dsAdapter != null;
 
+            _citations.Clear();
+
+            if (!_controllerAvailable || WebView.CoreWebView2 == null)
+            {
+                Log("Bridge 未就绪，等待页面加载...", LogLevel.Warn);
+                for (int i = 0; i < 30; i++)
+                {
+                    await Task.Delay(500);
+                    if (_controllerAvailable && WebView.CoreWebView2 != null) break;
+                }
+                if (!_controllerAvailable || WebView.CoreWebView2 == null)
+                {
+                    Log("Bridge 等待超时，尝试继续执行", LogLevel.Warn);
+                }
+            }
+
+            string diagnosticScript = @"
+(function() {
+    var result = { bridge: 'none', interceptor: 'unknown', pageReady: false, consoleLines: [] };
+    if (window.chrome && window.chrome.webview) {
+        result.bridge = 'ready';
+    } else if (typeof window.chrome === 'undefined') {
+        result.bridge = 'no_chrome';
+    } else {
+        result.bridge = 'no_webview';
+    }
+    if (typeof window.fetch === 'function') {
+        result.interceptor = (window.fetch.toString().indexOf('NETWORK_DATA') > -1) ? 'active' : 'passive';
+    }
+    result.pageReady = (document.readyState === 'complete' || document.readyState === 'interactive');
+    result.url = window.location.href;
+    
+    // 检查输入框是否存在
+    try {
+        var input = document.getElementById('chat-input') || document.querySelector('textarea');
+        result.hasInput = (input !== null);
+        if (input) {
+            result.inputVisible = (input.offsetParent !== null);
+            result.inputReadOnly = input.readOnly;
+            result.inputDisabled = input.disabled;
+        }
+    } catch (e) {
+        result.inputCheckError = e.toString();
+    }
+    
+    return JSON.stringify(result);
+})();
+";
+            try
+            {
+                string diagResultRaw = await WebView.CoreWebView2!.ExecuteScriptAsync(diagnosticScript);
+                string diagResult = diagResultRaw.Trim('"').Replace("\\\"", "\"");
+                Log($"诊断: {diagResult}", LogLevel.Info);
+
+                if (diagResult.Contains("no_chrome") || diagResult.Contains("no_webview"))
+                {
+                    Log("Bridge 不可用，等待重试...", LogLevel.Warn);
+                    await Task.Delay(3000);
+                    diagResultRaw = await WebView.CoreWebView2.ExecuteScriptAsync(diagnosticScript);
+                    diagResult = diagResultRaw.Trim('"').Replace("\\\"", "\"");
+                    Log($"重试诊断: {diagResult}", LogLevel.Info);
+                }
+
+                if (diagResult.Contains("\"interceptor\":\"passive\""))
+                {
+                    Log("拦截器未激活，重新注入网络拦截脚本...", LogLevel.Warn);
+                    await WebView.CoreWebView2.ExecuteScriptAsync(_adapter!.GetNetworkInterceptorScript());
+                    Log("已重新注入拦截脚本", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"诊断检查失败: {ex.Message}，尝试继续", LogLevel.Warn);
+            }
+
             if (needsPow)
             {
                 dsAdapter!.CapturedPowChallenge = null;
@@ -568,7 +915,6 @@ namespace WebAPI.Controls
             {
                 try
                 {
-                    // 注入 prompt 并发送
                     await _adapter!.InjectPromptAsync(WebView, prompt);
 
                     // DeepSeek PoW 流程
@@ -590,7 +936,7 @@ namespace WebAPI.Controls
                             Log("PoW 已解决，注入解决方案...", LogLevel.Info);
 
                             // 注入解决方案并触发发送
-                            await dsAdapter.InjectPowSolutionAsync(WebView, powSolution);
+                            await dsAdapter!.InjectPowSolutionAsync(WebView, powSolution);
                             await Task.Delay(500, _requestCts?.Token ?? CancellationToken.None);
                         }
                         else
@@ -681,7 +1027,7 @@ namespace WebAPI.Controls
             {
                 try
                 {
-                    await SendPromptAsync(prompt);
+                    await SendPromptAsync("", prompt);
                 }
                 catch (Exception ex)
                 {
@@ -713,13 +1059,18 @@ namespace WebAPI.Controls
                 if (WebView.CoreWebView2 != null)
                 {
                     WebView.CoreWebView2.Stop();
+                    PlaceholderText.Text = "正在刷新页面...";
+                    ShowLoadingSpinner();
+                    WebView.CoreWebView2.Reload();
+                    Log("页面正在刷新...", LogLevel.Info);
                 }
-
-                ShowLoadingSpinner();
-                PlaceholderText.Text = "正在重新初始化...";
-
-                await InitializeWebView2Async();
-                Log("浏览器内核已重启", LogLevel.Info);
+                else
+                {
+                    PlaceholderText.Text = "正在重新初始化...";
+                    ShowLoadingSpinner();
+                    await InitializeWebView2Async();
+                    Log("浏览器内核已重启", LogLevel.Info);
+                }
             }
             catch (Exception ex)
             {
@@ -728,7 +1079,7 @@ namespace WebAPI.Controls
             }
         }
 
-        private void BtnStopService_Click(object sender, RoutedEventArgs e)
+        private async void BtnStopService_Click(object sender, RoutedEventArgs e)
         {
             if (_isRunning)
             {
@@ -736,16 +1087,31 @@ namespace WebAPI.Controls
             }
             else
             {
-                // 启动：重新初始化 HTTP 服务 + WebView2
-                _isInitialized = false;
-                _ = InitializeAsync();
-                _isRunning = true;
+                BtnStopService.IsEnabled = false;
+                BtnStopService.Content = "⏳ 正在启动...";
+                PanelStatus.Text = "⏳ 正在初始化...";
+                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("TextSecondary");
 
-                BtnStopService.Content = "⏹ 停止 HTTP 服务";
-                BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentRed");
-                PanelStatus.Text = "✅ 正在运行 (V2)";
-                PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
-                Log("渠道已启动", LogLevel.Info);
+                try
+                {
+                    await InitializeAsync();
+                }
+                catch (Exception ex)
+                {
+                    Log($"启动失败: {ex.Message}", LogLevel.Error);
+                }
+
+                BtnStopService.IsEnabled = true;
+                if (_isRunning)
+                {
+                    BtnStopService.Content = "⏹ 停止 HTTP 服务";
+                    BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentRed");
+                }
+                else
+                {
+                    BtnStopService.Content = "▶ 启动 HTTP 服务";
+                    BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
+                }
             }
         }
 
@@ -757,12 +1123,11 @@ namespace WebAPI.Controls
             try
             {
                 _requestCts?.Cancel();
-                _streamSignal?.Dispose();
 
                 if (WebView.CoreWebView2 != null)
                 {
                     WebView.CoreWebView2.WebMessageReceived -= CoreWebView2_WebMessageReceived;
-                    WebView.CoreWebView2.NavigationCompleted -= WebView_NavigationCompleted;
+                    WebView.NavigationCompleted -= WebView_NavigationCompleted;
                     WebView.CoreWebView2.Stop();
                 }
             }
@@ -772,16 +1137,54 @@ namespace WebAPI.Controls
             }
 
             WebView.Visibility = Visibility.Collapsed;
-            PlaceholderText.Visibility = Visibility.Visible;
             PlaceholderText.Text = "WebView2 已停止，点击「启动 HTTP 服务」重新加载";
+            ShowLoadingSpinner();
 
+            _controllerAvailable = false;
             _isRunning = false;
-
+            _pageLoadTcs?.TrySetCanceled();
             BtnStopService.Content = "▶ 启动 HTTP 服务";
             BtnStopService.Background = (Brush)System.Windows.Application.Current.FindResource("AccentGreen");
-            PanelStatus.Text = "⏹ 已停止";
+            PanelStatus.Text = "⏹ 服务已停止";
             PanelStatus.Foreground = (Brush)System.Windows.Application.Current.FindResource("TextSecondary");
             Log("渠道已停止（HTTP 服务 + WebView2）", LogLevel.Warn);
+        }
+
+        private void BtnProxySettings_Click(object sender, RoutedEventArgs e)
+        {
+            _config.ProxySettings ??= new Models.ProxySettings();
+
+            var dialog = new ProxyConfigWindow(_config.ProxySettings)
+            {
+                Owner = System.Windows.Window.GetWindow(this)
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                _config.ProxySettings = dialog.Settings;
+                OnProxySettingsChanged?.Invoke();
+                Log($"代理配置已更新（启用={_config.ProxySettings.Enabled}，节点数={_config.ProxySettings.Nodes.Count}）", LogLevel.Info);
+            }
+        }
+
+        private string? GetProxyArgs()
+        {
+            var ps = _config.ProxySettings;
+            if (ps == null || !ps.Enabled || ps.Nodes.Count == 0)
+                return null;
+
+            int idx = ps.SelectedNodeIndex;
+            if (idx < 0 || idx >= ps.Nodes.Count) idx = 0;
+            var node = ps.Nodes[idx];
+
+            string proxyServer = $"--proxy-server={node.Type}://{node.Address}:{node.Port}";
+
+            if (ps.Mode == "bypass_cn")
+            {
+                proxyServer += " --proxy-bypass-list=<local>;*.cn;*.com.cn;*.org.cn;*.net.cn;*.gov.cn;*.edu.cn";
+            }
+
+            return proxyServer;
         }
 
         private void HideWebView()
@@ -827,12 +1230,33 @@ namespace WebAPI.Controls
             LoadingPlaceholder.Visibility = Visibility.Collapsed;
         }
 
-        private void CopyToClipboard(string text)
+        private async Task CopyToClipboardAsync(string text)
         {
+            var tcs = new TaskCompletionSource<bool>();
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    System.Windows.Clipboard.SetText(text);
+                    tcs.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Start();
+
             try
             {
-                System.Windows.Clipboard.SetText(text);
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
                 Log($"已复制: {text}", LogLevel.Debug);
+            }
+            catch (TimeoutException)
+            {
+                Log("复制超时（剪贴板被占用）", LogLevel.Error);
             }
             catch (Exception ex)
             {
@@ -840,42 +1264,157 @@ namespace WebAPI.Controls
             }
         }
 
-        private void BtnCopyBaseUrl_Click(object sender, RoutedEventArgs e)
-            => CopyToClipboard(TxtBaseUrl.Text);
+        private async void BtnCopyBaseUrl_Click(object sender, RoutedEventArgs e)
+            => await CopyToClipboardAsync(TxtBaseUrl.Text);
 
-        private void BtnCopyApiKey_Click(object sender, RoutedEventArgs e)
-            => CopyToClipboard(TxtApiKey.Text);
+        private async void BtnCopyApiKey_Click(object sender, RoutedEventArgs e)
+            => await CopyToClipboardAsync(TxtApiKey.Text);
 
-        private void BtnCopyModel_Click(object sender, RoutedEventArgs e)
+        private async void BtnCopyModel_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button btn && btn.DataContext is ModelInfo model)
-                CopyToClipboard(model.Id);
+                await CopyToClipboardAsync(model.Id);
         }
 
-        private void ModelId_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private async void ModelId_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (sender is TextBox txt && !string.IsNullOrEmpty(txt.Text))
-                CopyToClipboard(txt.Text);
+                await CopyToClipboardAsync(txt.Text);
         }
 
-        private void BtnDeepThink_Checked(object sender, RoutedEventArgs e)
+        private async void BtnTestModel_Click(object sender, RoutedEventArgs e)
         {
+            if (sender is not Button btn || btn.DataContext is not ModelInfo model)
+                return;
+
+            if (_adapter == null || WebView.CoreWebView2 == null)
+            {
+                Log("[测试] WebView2 未就绪，无法测试", LogLevel.Warn);
+                return;
+            }
+
+            if (!_requestLock.Wait(0))
+            {
+                Log("[测试] 正在处理其他请求，请稍候", LogLevel.Warn);
+                return;
+            }
+
+            _requestLock.Release();
+
+            btn.IsEnabled = false;
+            btn.Content = "⏳";
+            Log($"[测试] 开始测试模型: {model.Id}，发送: hi", LogLevel.Info);
+
+            try
+            {
+                var result = await SendPromptAsync(model.Id, "hi");
+                if (result.StartsWith("[错误]") || result == "请求超时")
+                {
+                    Log($"[测试] 模型 {model.Id} 测试失败: {result}", LogLevel.Error);
+                }
+                else
+                {
+                    Log($"[测试] 模型 {model.Id} 测试成功，回复长度: {result.Length}", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[测试] 模型 {model.Id} 测试异常: {ex.Message}", LogLevel.Error);
+            }
+            finally
+            {
+                btn.IsEnabled = true;
+                btn.Content = "测试";
+            }
+        }
+
+        private async void BtnDeepThink_Checked(object sender, RoutedEventArgs e)
+        {
+            _deepThinkEnabled = true;
             Log("深度思考模式已开启", LogLevel.Info);
+            await SwitchModelModeAsync();
         }
 
-        private void BtnDeepThink_Unchecked(object sender, RoutedEventArgs e)
+        private async void BtnDeepThink_Unchecked(object sender, RoutedEventArgs e)
         {
+            _deepThinkEnabled = false;
             Log("深度思考模式已关闭", LogLevel.Info);
+            await SwitchModelModeAsync();
         }
 
-        private void BtnSearch_Checked(object sender, RoutedEventArgs e)
+        private async void BtnSearch_Checked(object sender, RoutedEventArgs e)
         {
+            _searchEnabled = true;
             Log("智能搜索模式已开启", LogLevel.Info);
+            await SwitchModelModeAsync();
         }
 
-        private void BtnSearch_Unchecked(object sender, RoutedEventArgs e)
+        private async void BtnSearch_Unchecked(object sender, RoutedEventArgs e)
         {
+            _searchEnabled = false;
             Log("智能搜索模式已关闭", LogLevel.Info);
+            await SwitchModelModeAsync();
+        }
+
+        private async Task SwitchModelModeAsync()
+        {
+            if (_adapter == null || WebView.CoreWebView2 == null) return;
+            try
+            {
+                string script = _adapter.GetModeSwitchScript(_deepThinkEnabled, _searchEnabled);
+                if (!string.IsNullOrEmpty(script))
+                {
+                    await WebView.CoreWebView2.ExecuteScriptAsync(script);
+                    Log($"已切换模式: DeepThink={_deepThinkEnabled}, Search={_searchEnabled}", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"切换模式失败: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
+        private async Task SwitchModeBeforePromptAsync(string modelId)
+        {
+            if (_adapter == null || WebView.CoreWebView2 == null) return;
+
+            bool wantDeepThink = _deepThinkEnabled;
+            bool wantSearch = _searchEnabled;
+
+            if (!string.IsNullOrEmpty(modelId))
+            {
+                if (_config.Id == "deepseek")
+                {
+                    wantDeepThink = modelId.Contains("reasoner");
+                    wantSearch = modelId.Contains("search");
+                }
+            }
+
+            if (wantDeepThink != _deepThinkEnabled || wantSearch != _searchEnabled)
+            {
+                try
+                {
+                    string script = _adapter.GetModeSwitchScript(wantDeepThink, wantSearch);
+                    if (!string.IsNullOrEmpty(script))
+                    {
+                        await WebView.CoreWebView2.ExecuteScriptAsync(script);
+                        Log($"API模式切换: DeepThink={wantDeepThink}, Search={wantSearch}", LogLevel.Info);
+                    }
+
+                    _deepThinkEnabled = wantDeepThink;
+                    _searchEnabled = wantSearch;
+
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        BtnDeepThink.IsChecked = _deepThinkEnabled;
+                        BtnSearch.IsChecked = _searchEnabled;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Log($"API模式切换失败: {ex.Message}", LogLevel.Warn);
+                }
+            }
         }
     }
 }

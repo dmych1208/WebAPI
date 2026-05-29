@@ -4,15 +4,15 @@
 
 ## 支持平台
 
-| 平台       | 端口    | 是否需要代理    | 通信协议         |
-| -------- | ----- | --------- | ------------ |
-| DeepSeek | 55555 | 否         | SSE + PoW    |
-| 通义千问     | 56666 | 否         | SSE          |
-| 豆包       | 55556 | 否         | 自定义事件        |
-| Gemini   | 56667 | 是（内置代理支持） | SSE          |
-| Grok     | 56668 | 是（内置代理支持） | SSE          |
-| 元宝增强     | 56669 | 否         | SSE          |
-| Kimi     | 56670 | 否         | connect+json |
+| 平台 | 端口 | 是否需要代理 | 通信协议 |
+|------|------|-------------|----------|
+| DeepSeek | 55555 | 否 | SSE + PoW |
+| 通义千问 | 56666 | 否 | SSE |
+| 豆包 | 55556 | 否 | 自定义事件 |
+| Gemini | 56667 | 是（内置代理支持） | SSE |
+| Grok | 56668 | 是（内置代理支持） | SSE |
+| 元宝增强 | 56669 | 否 | SSE |
+| Kimi | 56670 | 否 | connect+json |
 
 ## 架构设计
 
@@ -130,12 +130,25 @@ SendPromptStreamCoreAsync 消费循环
 
 所有页面数据通过 `window.chrome.webview.postMessage()` 传递：
 
-| 消息类型           | 说明             | 数据格式                          |
-| -------------- | -------------- | ----------------------------- |
+| 消息类型 | 说明 | 数据格式 |
+|---------|------|---------|
 | `NETWORK_DATA` | 拦截到的网络响应 chunk | `{type, url, data: "原始响应文本"}` |
-| `NETWORK_DONE` | 网络请求完成         | `{type, url}`                 |
+| `NETWORK_DONE` | 网络请求完成 | `{type, url}` |
 
-#### 3. 反检测
+#### 2. C# → JS: ExecuteScriptAsync + AddScriptToExecuteOnDocumentCreatedAsync
+
+| 注入方式 | 时机 | 用途 |
+|---------|------|------|
+| `AddScriptToExecuteOnDocumentCreatedAsync` | 每次文档创建时 | 网络拦截器（持久注入） |
+| `ExecuteScriptAsync` | 每次请求时 | DOM 操作（输入 prompt） |
+| `ExecuteScriptAsync` | 模式切换时 | 深度思考/联网搜索按钮 |
+
+#### 3. 反检测机制
+
+- `navigator.webdriver` 删除 + 伪造 `plugins`/`languages`
+- Chrome 124 User-Agent 伪装
+- 页面加载后重新注入反检测脚本
+- CompositionEvent 输入法事件序列（绕过 React 检测）
 
 #### 4. DeepSeek PoW 流程
 
@@ -151,10 +164,41 @@ CPU 多核并行暴力搜索 SHA-256 nonce
 fetch/EventSource 拦截 → SSE 数据流回传
 ```
 
-## ## 安装与运行
+## 项目结构
+
+```
+WebAPI/
+├── src/WebAPI/
+│   ├── Adapters/              # 平台适配器
+│   │   ├── IAdapter.cs        # 适配器接口
+│   │   ├── DeepSeekAdapter.cs # DeepSeek (含 PoW 挑战求解)
+│   │   ├── QwenAdapter.cs     # 通义千问 (CompositionEvent 输入)
+│   │   ├── DoubaoAdapter.cs   # 豆包
+│   │   ├── GeminiAdapter.cs   # Gemini (fetch+XHR+EventSource)
+│   │   ├── GrokAdapter.cs     # Grok
+│   │   ├── YuanbaoAdapter.cs  # 元宝增强
+│   │   └── KimiAdapter.cs     # Kimi (connect+json 协议)
+│   ├── Common/
+│   │   ├── ChannelHttpServer.cs # HTTP 服务器 (HttpListener)
+│   │   ├── ConfigManager.cs     # 配置管理 (JSON 读写+热重载)
+│   │   ├── LogManager.cs        # 日志管理
+│   │   └── SseParser.cs         # SSE 数据解析
+│   ├── Controls/
+│   │   ├── ChannelPanel.xaml/.cs     # 渠道面板 (WebView2 宿主+诊断)
+│   │   └── ProxyConfigWindow.xaml/.cs # 代理配置窗口
+│   ├── Models/
+│   │   ├── Models.cs           # ChannelConfig, ModelInfo, ChatRequest 等
+│   │   └── ProxyModels.cs      # ProxyNode, ProxySettings
+│   ├── App.xaml/.cs
+│   └── MainWindow.xaml/.cs     # 主窗口 (标签页+状态栏+健康检查)
+├── config/
+│   └── settings.json           # 渠道 + 代理配置 (支持热重载)
+└── WebAPI.sln
+```
+
+## 安装与运行
 
 ### 系统要求
-
 - Windows 10 / 11
 - .NET 9.0 SDK
 - WebView2 Runtime (Windows 11 自带，Win10 需安装)
@@ -241,10 +285,41 @@ Gemini、Grok 等国外平台内置代理支持：
 6. 选择模式：🌏 绕过中国大陆 / 🌐 全局模式
 7. 点击保存后需重启渠道
 
-## ## 状态栏健康检查
+## 网络拦截策略详解
+
+### Fetch 拦截
+
+使用 `response.clone()` 策略，对原始响应做零侵入旁观式拦截：
+
+```javascript
+const clone = response.clone();           // 克隆响应
+(async () => {
+    const reader = clone.body.getReader(); // 从副本读取
+    // ... 逐 chunk 通过 postMessage 发送到 C#
+})();
+return response;                           // 返回原始响应
+```
+
+### EventSource 拦截
+
+双重拦截确保覆盖：
+
+1. **addEventListener 包装**：拦截所有通过 `addEventListener` 注册的回调
+2. **onmessage/onopen/onerror 属性拦截**：使用 `Object.defineProperty` 拦截属性赋值，自动转为 `addEventListener` 调用
+
+### 诊断机制
+
+每次发送 prompt 前执行诊断脚本，检测：
+- Bridge 状态（`window.chrome.webview` 是否可用）
+- 拦截器状态（`window.fetch.toString()` 中是否包含 NETWORK_DATA）
+- 页面就绪状态（`document.readyState`）
+- 当前页面 URL
+
+如果拦截器未激活，自动重新注入网络拦截脚本。
+
+## 状态栏健康检查
 
 底部状态栏使用双重健康检查：
-
 1. **HTTP 健康检查**：每 10 秒 GET `/health` 端点
 2. **页面健康检查**：页面加载后检测 `document.title` 是否包含错误信息（ERR_、无法访问、proxy、timeout 等）
 

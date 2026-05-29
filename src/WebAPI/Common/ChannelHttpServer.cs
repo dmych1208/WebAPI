@@ -30,13 +30,13 @@ namespace WebAPI.Common
         /// <summary>
         /// 处理完整 prompt 并返回结果的函数（非流式 fallback）
         /// </summary>
-        public Func<string, Task<string>>? ProcessPromptFunc { get; set; }
+        public Func<string, string, Task<string>>? ProcessPromptFunc { get; set; }
 
         /// <summary>
         /// 流式处理函数：注入 prompt 后，通过 OnStreamChunk 回调逐步返回数据
         /// 返回值：最终完整响应文本
         /// </summary>
-        public Func<string, Action<string, bool>, Task<string>>? ProcessPromptStreamFunc { get; set; }
+        public Func<string, string, Action<string, bool>, Task<string>>? ProcessPromptStreamFunc { get; set; }
 
         public event Action<string>? OnLog;
         public event Action? OnRequest;
@@ -232,7 +232,7 @@ namespace WebAPI.Common
                 };
 
                 // 启动 prompt 处理（后台）
-                var processTask = Task.Run(() => ProcessPromptStreamFunc(fullPrompt, streamCallback));
+                var processTask = Task.Run(() => ProcessPromptStreamFunc(chatReq.Model, fullPrompt, streamCallback));
 
                 var sb = new StringBuilder();
 
@@ -312,7 +312,7 @@ namespace WebAPI.Common
                 try
                 {
                     result = ProcessPromptFunc != null
-                        ? await ProcessPromptFunc(fullPrompt)
+                        ? await ProcessPromptFunc(chatReq.Model, fullPrompt)
                         : $"[{_config.Name}] 无处理函数";
                 }
                 catch (Exception ex)
@@ -355,7 +355,7 @@ namespace WebAPI.Common
             try
             {
                 result = ProcessPromptFunc != null
-                    ? await ProcessPromptFunc(fullPrompt)
+                    ? await ProcessPromptFunc(chatReq.Model, fullPrompt)
                     : $"[{_config.Name}] 无处理函数";
             }
             catch (Exception ex)

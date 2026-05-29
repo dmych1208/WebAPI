@@ -10,6 +10,7 @@ namespace WebAPI.Models
         public string TargetUrl { get; set; } = "";
         public string Icon { get; set; } = "💬";
         public string UserDataFolder { get; set; } = "";
+        public ProxySettings? ProxySettings { get; set; }
         public List<ModelInfo> Models { get; set; } = new();
     }
 

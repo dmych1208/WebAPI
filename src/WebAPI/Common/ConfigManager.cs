@@ -24,7 +24,7 @@ namespace WebAPI.Common
 
                 _watcherInitialized = true;
 
-                string configDir = Path.GetDirectoryName(ConfigPath);
+                string? configDir = Path.GetDirectoryName(ConfigPath);
                 if (string.IsNullOrEmpty(configDir) || !Directory.Exists(configDir))
                     return;
 
@@ -77,6 +77,7 @@ namespace WebAPI.Common
             var paths = new[]
             {
                 ConfigPath,
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "..", "config", "settings.json"),
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "config", "settings.json"),
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json")
             };
@@ -88,7 +89,8 @@ namespace WebAPI.Common
                     try
                     {
                         var json = File.ReadAllText(path);
-                        var config = JsonSerializer.Deserialize<RootConfig>(json);
+                        var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                        var config = JsonSerializer.Deserialize<RootConfig>(json, jsonOptions);
                         if (config?.Channels != null && config.Channels.Count > 0)
                             return config.Channels.Where(c => c.Enabled).ToList();
                     }
@@ -160,6 +162,41 @@ namespace WebAPI.Common
         private class RootConfig
         {
             public List<ChannelConfig>? Channels { get; set; }
+        }
+
+        public static void SaveChannels(List<ChannelConfig> channels)
+        {
+            try
+            {
+                var root = new RootConfig { Channels = channels };
+                var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, WriteIndented = true };
+                var json = JsonSerializer.Serialize(root, jsonOptions);
+
+                string configDir = Path.GetDirectoryName(ConfigPath)!;
+                Directory.CreateDirectory(configDir);
+
+                lock (_watcherLock)
+                {
+                    if (_watcher != null)
+                        _watcher.EnableRaisingEvents = false;
+
+                    File.WriteAllText(ConfigPath, json);
+                }
+
+                LogManager.Write($"配置已保存到 {ConfigPath}，共 {channels.Count} 个渠道", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                LogManager.Write($"保存配置失败: {ex.Message}", LogLevel.Error);
+            }
+            finally
+            {
+                lock (_watcherLock)
+                {
+                    if (_watcher != null)
+                        _watcher.EnableRaisingEvents = true;
+                }
+            }
         }
     }
 }

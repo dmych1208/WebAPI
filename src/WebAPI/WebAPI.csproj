@@ -18,10 +18,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="logo.ico" />
+    <Content Include="logo.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <None Include="logo.png" Condition="Exists('logo.png')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Content Include="..\..\config\settings.json" Condition="Exists('..\..\config\settings.json')">
+      <Link>config\settings.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- IconInjector 是独立工具，排除以避免与 WPF App 的 Main 冲突 -->

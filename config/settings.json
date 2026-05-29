@@ -38,6 +38,61 @@
         { "id": "doubao-pro", "name": "豆包Pro" },
         { "id": "doubao-lite", "name": "豆包Lite" }
       ]
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "enabled": true,
+      "port": 56667,
+      "targetUrl": "https://gemini.google.com/",
+      "icon": "✂️",
+      "models": [
+        { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" },
+        { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
+        { "id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash" }
+      ]
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "enabled": true,
+      "port": 56668,
+      "targetUrl": "https://grok.com/",
+      "icon": "🤖",
+      "models": [
+        { "id": "grok-4", "name": "Grok 4" },
+        { "id": "grok-4-thinking", "name": "Grok 4 Thinking" },
+        { "id": "grok-3", "name": "Grok 3" }
+      ]
+    },
+    {
+      "id": "yuanbao",
+      "name": "元宝增强",
+      "enabled": true,
+      "port": 56669,
+      "targetUrl": "https://yuanbao.tencent.com/chat/",
+      "icon": "🐧",
+      "models": [
+        { "id": "yuanbao-pro", "name": "元宝Pro" },
+        { "id": "yuanbao-turbo", "name": "元宝Turbo" },
+        { "id": "yuanbao-deepseek", "name": "元宝DeepSeek" }
+      ]
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "enabled": true,
+      "port": 56670,
+      "targetUrl": "https://www.kimi.com/",
+      "icon": "🌀",
+      "models": [
+        { "id": "kimi-k2.5-fast", "name": "K2.5 快速" },
+        { "id": "kimi-k2.5-fast-search", "name": "K2.5 快速+搜索" },
+        { "id": "kimi-k2.5-thinking", "name": "K2.5 思考" },
+        { "id": "kimi-k2.5-thinking-search", "name": "K2.5 思考+搜索" },
+        { "id": "kimi-k2.5-agent", "name": "K2.5 Agent" },
+        { "id": "kimi-k2.5-agent-swarm", "name": "K2.5 Agent 集群" }
+      ]
     }
   ],
   "logging": {

@@ -86,7 +86,13 @@ namespace WebAPI.Common
                 json == "FINISHED")
                 return true;
 
-            if (eventType is "title" or "update_session" or "search_result" or "ping")
+            if (json.Contains("AI question rephraser") ||
+                json.Contains("rephrase") ||
+                json.Contains("query_rewrite") ||
+                json.Contains("search_query"))
+                return true;
+
+            if (eventType is "title" or "update_session" or "search_result" or "ping" or "search" or "rephrase" or "rewrite")
                 return true;
 
             return false;
